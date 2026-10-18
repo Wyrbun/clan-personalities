@@ -5,7 +5,7 @@
   "apiVersion": "1",
   "entrypoint": "modules.clanpersonalities.ClanPersonalityModule",
   "description": "Living-world social sim: assigns personas (Peaceful, Neutral, Altruistic, Aggressive, Player-Killing) to living clans whose phantom members chatter, start drama and retaliate in chat, remembering what was said. This phase is chat-only: no combat behavior.",
-  "author": "thiag",
+  "author": "Wyrbun",
   "priority": 100,
   "dependencies": [],
   "conflicts": [],
