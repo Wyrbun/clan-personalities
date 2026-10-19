@@ -53,32 +53,40 @@ the authoritative fallback when a key is ambiguous.
 
 ## The LLM tier (FPC brain)
 
-The pack ships an optional local brain (`brain\fpc_brain.py`, Flask + Ollama /
-DeepSeek; endpoint `http://127.0.0.1:5000/chat`). When `UseBrain = True`, the
-module asks it to write each outgoing line (`POST /chat`, headers `X-FPC` =
-the speaking member's real name so the brain keeps its stable voice,
-`X-Mode`, `X-Location`; body = a composed situation prompt that includes clan
-membership, temperament, the drama target and the last remembered exchanges).
-The brain already enforces single-line, tag-free replies; the module re-checks
-length and newlines regardless.
+The pack's local brain (`brain\fpc_brain.py`, Flask + Ollama; endpoint
+`http://127.0.0.1:5000/chat`) is **REQUIRED**, not optional: it writes EVERY
+spoken line. The module asks it to write each outgoing line (`POST /chat`,
+headers `X-FPC` = the speaking member's real name so the brain keeps its
+stable voice, `X-Mode`, `X-Location`, plus the spam-filter handshake below;
+body = a composed situation prompt that includes clan membership,
+temperament, the drama target and the last remembered exchanges). The brain
+already enforces single-line, tag-free replies; the module re-checks length
+and newlines regardless.
 
 Failure contract (the reason this is safe):
-- **Unavailable/slow/error** → the configured line pools answer that message
-  unchanged; the module pauses brain attempts for 10 minutes afterward.
+- **Unavailable/slow/error** → that message silently does not happen. No
+  static pool ever stands in for a clan's voice; a skipped line is logged
+  (`brain miss ...`) and gets ONE quick retry before it is given up on.
 - All tempo rules stay module-owned: personas, queue, caps, cooldowns decide
   who speaks when; the brain decides only the words.
-- The brain being off (it is optional by the pack's design, see
-  `brain\README.md`) degrades tone, never behavior.
+- The brain being off makes the clans hold their tongues; behavior never
+  degrades into canned text.
+
+Headers: `X-Human` (the brain's exemption from its topic-cooldown spam
+filter) is sent while the brain has no dedicated mode for module-directed
+lines — governed by `BrainHumanFlag` in the ini, to be set False the moment
+the brain gains that mode. `X-Directed-By: <BrainDirectedHeader>` is always
+sent as the reserved handshake for that future mode.
 
 ## Layout
 
 ```text
 clan-personalities/
   module.json                  # manifest; empty reserves, no database, no hooks
-  config/module.ini            # master switch + personas + tempo + line pools
+  config/module.ini            # master switch + personas + tempo + brain dials
   scripts/
     ClanPersonalityModule.java # entry point (GameModule), modules.clanpersonalities
-    BrainClient.java           # optional LLM tier; talks to the pack's FPC brain
+    BrainClient.java           # required LLM tier; talks to the pack's FPC brain
     DramaEngine.java           # the engine: resolution, rolls, gates, reactions
     ClanSpec.java              # configured clan: token/id + persona + group
     ClanProfile.java           # resolved clan: name, cooldown, presence
@@ -151,9 +159,9 @@ Resolved by reading `GameServer.jar` (`javap`); these are no longer guesses:
   (`%ABB%`, `%CLAN%`). Choices of asker: crest-less fake players first, then
   living-population phantoms; never the human player.
 - Brain transparency: `BrainClient.probe()` logs one boot-time reachability
-  verdict; delivered lines report their source as `brain` or `pool`, and a
-  `brain miss` line explains each fallback. `parseLines` strips wrapping
-  quotation marks, so quoted config entries never leak `"` into chat.
+  verdict; delivered lines report their source, and a `brain miss` line
+  explains each skip. `parseLines` strips wrapping quotation marks, so
+  quoted config entries never leak `"` into chat.
 
 
 ## Phase roadmap
@@ -325,3 +333,39 @@ Resolved by reading `GameServer.jar` (`javap`); these are no longer guesses:
   bystander may ask what happened - and then BOTH clans give their own
   version, each brain-written, each remembering it their way. Fresh
   quarrels overwrite the pair's older story.
+
+## The threading hardening round (v0.1.1)
+
+Every fix below came from the first outside server test (Teras's report):
+nothing gameplay-new, just the ways the module could stall or drag the
+server with it.
+
+- **The brain never blocks the game's threads.** All brain generations -
+  drama beats, takeovers, resolutions, story asks and side tellings,
+  leadership asks and replies, clarify asides, typo fixes - run on the
+  pack's dedicated `BrainExecutor` pool (bounded; a beat queued longer than
+  20 s is dropped stale, by the pack's design). Delivery hops back onto the
+  game pool, so no regen, skill or AI timer ever parks behind a 45-second
+  answer. Under heavy brain load a beat may now be silently dropped instead
+  of speaking late - that is the intended stale-drop, never a stall.
+- **Boot no longer waits on the brain.** The probe runs on a background
+  daemon thread (`clan-personalities-boot-probe`); a freshly loading Ollama
+  can take minutes, and the game server must never sit boot-less waiting.
+  Until the probe succeeds the engine simply has no brain: every beat
+  composes nothing and the module is silent - exactly the "stays inactive"
+  contract while the server starts.
+- **The warm-keeper sleeps and dies.** It arms only after a successful
+  probe, pings the brain only while players are online (on a cloud brain
+  every idle ping is money), and is stopped in `onDisable`.
+- **Persona files anchor to the pack's registry.** `personas.properties`
+  resolves from `ModulesConfig.getModulesRoot()` (the pack's module
+  registry root) - never a working-directory guess made by whichever
+  launcher started the server - with the relative modules folder as
+  fallback for older builds.
+- **Bystanders rotate.** The clan-less voice that asks "what does that
+  nickname mean?" (and story questions) is now drawn at random from every
+  candidate in the world, instead of always the first townsperson found.
+- **Header handshake in config**: `BrainHumanFlag` (= True while the brain
+  lacks a directed-lines mode; Teras is drafting it brain-side) and
+  `BrainDirectedHeader` (always sent as `X-Directed-By`, the reserved
+  handshake for that mode).

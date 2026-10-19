@@ -16,19 +16,21 @@ previous arguments (they come back hungrier for their rivals), and heavy anti-cl
 rules so your chat stays readable. **No combat is touched.** Real clan wars, PvP and
 damage stay 100% stock; these clans are mouth, not blade — for now.
 
-## The brain writes the words (optional, on by default)
+## The brain writes the words (required)
 
-This module talks to the pack's optional **FPC brain** (`brain\fpc_brain.py`,
-local Ollama - `UseBrain = True` in config). When the brain is up, clan lines
-are **generated live** with the speaking bot's own in-character voice - so
-feuds sound organic instead of canned, and replies actually continue previous
-arguments. Clan speech goes to the **world chat (SHOUT)** channel, visible
-everywhere, so you can witness it wherever you are (`ChatChannel = SHOUT`).
+This module talks to the pack's **FPC brain** (`brain\fpc_brain.py`, local
+Ollama). Clan lines are **generated live** with the speaking bot's own
+in-character voice - so feuds sound organic instead of canned, and replies
+actually continue previous arguments. Clan speech goes to the **world chat
+(SHOUT)** channel, visible everywhere, so you can witness it wherever you
+are (`ChatChannel = SHOUT`).
 
-If the brain is off, unreachable, or slow: nothing breaks - the module quietly
-falls back to the configured line pools, and retries the brain later. All
-limits (hour cap, cooldowns, queues) still apply; you can lower volume before
-you lower anything else if a `12b`-class model makes lines arrive slower.
+The brain is not optional: every spoken word is written by it. If the brain
+is off, unreachable, or slow, nothing breaks and nothing canned is spoken -
+the clans simply hold their tongues (a skipped line retries once, then stays
+silent), and they speak again the moment the brain answers. All limits (hour
+cap, cooldowns, queues) still apply; you can lower volume before you lower
+anything else if a `12b`-class model makes lines arrive slower.
 
 ## Install
 
@@ -62,7 +64,7 @@ meet again. If a clan has no members actually in the world, it says nothing.
 - `MaxResponsesPerDrama` limits how many clans pile in.
 - `MinMessageDelayMinutes` / `MaxMessageDelayMinutes` spread the queue.
 - Lower `DramaStartChance` for a lazier world; lower `AmbientChance` for less chatter.
-- Every clan line is editable in `config/module.ini` (`PlayerKillerAmbient = ...` etc.).
+- The words themselves are not editable: the brain writes every line fresh.
 
 ## Uninstall
 
@@ -97,4 +99,11 @@ module folder. Nothing is stored in the database, so removal is a clean delete.
 - **Kindness too**: clans help each other, get thanked, and remember it
   — later quarrels may bring up the favor. Hot-tempered clans can be
   cocky about their good deeds.
+- **v0.1.1 hardening** (no new behavior): brain generations run on the
+  pack's dedicated brain pool so game timers never wait on Ollama; the boot
+  probe runs in the background (server start is never delayed); the
+  brain's warm-keeper sleeps with nobody online and stops with the module;
+  persona files anchor to the pack's module registry; and the clan-less
+  bystanders who ask about nicknames rotate instead of always being the
+  same townsperson.
 - See `MODULE.md` for maintainer notes, the phase roadmap, and full config reference.

@@ -27,8 +27,10 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.logging.Logger;
 
 import org.l2jmobius.commons.threads.ThreadPool;
+import org.l2jmobius.gameserver.model.World;
 import org.l2jmobius.gameserver.modules.GameModule;
 import org.l2jmobius.gameserver.modules.ModuleContext;
+import org.l2jmobius.gameserver.modules.ModulesConfig;
 import org.l2jmobius.gameserver.network.enums.ChatType;
 
 /**
@@ -38,6 +40,8 @@ public final class ClanPersonalityModule implements GameModule
 {
 	/** The one shared tick task; kept for the future hot-unload path. */
 	private ScheduledFuture<?> _tickTask;
+	/** The brain handle, kept so a future hot-unload can stop its threads. */
+	private volatile BrainClient _brainClient;
 
 	@Override
 	public void onEnable(ModuleContext context)
@@ -113,19 +117,37 @@ public final class ClanPersonalityModule implements GameModule
 
 		// The FPC brain is REQUIRED. Every spoken line - drama, resolution,
 		// takeover brag, clarify aside, typo fix - is written by it; there
-		// are no static pools to fall back on. Probe once at boot: an
-		// unreachable brain disables the module loudly (an error in the log,
-		// nothing registered), and the server behaves as if it were absent.
-		final BrainClient brain = new BrainClient(context.config().getString("BrainUrl", "http://127.0.0.1:5000/chat"), context.config().getInt("BrainTimeoutMillis", 45000));
-		final String brainError = brain.probe();
-		if (brainError != null)
+		// are no static pools to fall back on. The probe RUNS IN THE
+		// BACKGROUND: a freshly loading Ollama can take minutes to answer,
+		// and the game server must never sit boot-less waiting on it. Until
+		// the probe succeeds the engine simply has no brain - every beat
+		// composes nothing and the module is silent, which is exactly the
+		// "stays inactive" contract held while the server starts.
+		_brainClient = new BrainClient(context.config().getString("BrainUrl", "http://127.0.0.1:5000/chat"), context.config().getInt("BrainTimeoutMillis", 45000));
+		// Which spam-filter doors the drama lines knock on (see BrainClient):
+		// the human flag is still needed while the brain lacks a directed-
+		// lines mode; X-Directed-By is always announced for that future mode.
+		_brainClient.setHeaders(context.config().getBoolean("BrainHumanFlag", true), context.config().getString("BrainDirectedHeader", "clan-personalities"));
+		final DramaEngine bootEngine = engine;
+		final BrainClient bootBrain = _brainClient;
+		final Thread probeThread = new Thread(() ->
 		{
-			context.logging().severe("clan-personalities ERROR: the FPC brain is unreachable (" + brainError + ").");
-			context.logging().severe("clan-personalities: this module's voice is entirely brain-written and REQUIRES the brain at " + context.config().getString("BrainUrl", "http://127.0.0.1:5000/chat") + ". Start brain\\fpc_brain.py (Ollama) and restart the game server. Until then the module stays inactive and the server behaves as if it were absent.");
-			return;
-		}
-		context.logging().info("clan-personalities: FPC brain reachable - the module's voice is entirely brain-written.");
-		engine.setBrain(brain);
+			final String brainError = bootBrain.probe();
+			if (brainError != null)
+			{
+				context.logging().severe("clan-personalities ERROR: the FPC brain is unreachable (" + brainError + ").");
+				context.logging().severe("clan-personalities: this module's voice is entirely brain-written and REQUIRES the brain at " + context.config().getString("BrainUrl", "http://127.0.0.1:5000/chat") + ". Start brain\\fpc_brain.py (Ollama) and restart the game server. Until then the module stays inactive and the server behaves as if it were absent.");
+				return;
+			}
+			context.logging().info("clan-personalities: FPC brain reachable - the module's voice is entirely brain-written.");
+			bootEngine.setBrain(bootBrain);
+			// The warm-keeper starts only NOW - a successful probe, and
+			// gated on actual players: with nobody in the world the model
+			// is allowed to cool, which costs nothing between sessions.
+			bootBrain.startKeeper(() -> !World.getInstance().getPlayers().isEmpty());
+		}, "clan-personalities-boot-probe");
+		probeThread.setDaemon(true);
+		probeThread.start();
 
 		// Where clan speech goes: SHOUT = visible everywhere (world chat),
 		// GENERAL = the nearby bubble only. Also how the brain is addressed.
@@ -248,6 +270,14 @@ public final class ClanPersonalityModule implements GameModule
 		{
 			_tickTask.cancel(false);
 			_tickTask = null;
+		}
+		// The warm-keeper must not outlive the module: on a cloud brain every
+		// ping after shutdown is money spent for nobody.
+		final BrainClient brain = _brainClient;
+		if (brain != null)
+		{
+			brain.stopKeeper();
+			_brainClient = null;
 		}
 	}
 
@@ -393,13 +423,18 @@ public final class ClanPersonalityModule implements GameModule
 
 	// ── STABLE persona storage (personas.properties in the module folder) ──
 
-	/** The module folder resolves from the game server's working directory. */
+	/**
+	 * The module folder resolves from the pack's module registry root
+	 * (ModulesConfig) - never a working-directory guess made by whatever
+	 * launched the server. Old pack builds without the registry fall back
+	 * to the relative modules folder.
+	 */
 	private static File personaStateFile()
 	{
-		File dir = new File("modules", "clan-personalities");
+		File dir = new File(ModulesConfig.getModulesRoot(), "clan-personalities");
 		if (!dir.isDirectory())
 		{
-			final File fallback = new File(System.getProperty("user.dir"), "modules" + File.separator + "clan-personalities");
+			final File fallback = new File("modules", "clan-personalities");
 			if (fallback.isDirectory())
 			{
 				dir = fallback;

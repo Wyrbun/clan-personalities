@@ -1,10 +1,10 @@
 {
   "id": "clan-personalities",
   "name": "Clan Personalities",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "apiVersion": "1",
   "entrypoint": "modules.clanpersonalities.ClanPersonalityModule",
-  "description": "Living-world social sim: assigns personas (Peaceful, Neutral, Altruistic, Aggressive, Player-Killing) to living clans whose phantom members chatter, start drama and retaliate in chat, remembering what was said. This phase is chat-only: no combat behavior.",
+  "description": "Living-world social sim: assigns personas (Peaceful, Neutral, Altruistic, Aggressive, Player-Killing) to living clans whose phantom members chatter, start drama and retaliate in chat, remembering what was said. This phase is chat-only: no combat behavior. v0.1.1 hardening: brain generations run on the pack's dedicated brain pool (never the game's timers), the boot probe no longer stalls server start, the warm-keeper sleeps with nobody online and stops with the module, persona files anchor to the pack's module registry root, and world-chat bystanders rotate instead of always asking the same townsperson.",
   "author": "Wyrbun",
   "priority": 100,
   "dependencies": [],

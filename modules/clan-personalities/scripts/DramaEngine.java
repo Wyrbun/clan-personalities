@@ -43,6 +43,7 @@ import org.l2jmobius.commons.threads.ThreadPool;
 import org.l2jmobius.commons.util.Rnd;
 import org.l2jmobius.gameserver.data.sql.ClanTable;
 import org.l2jmobius.gameserver.managers.BotClanManager;
+import org.l2jmobius.gameserver.managers.BrainExecutor;
 import org.l2jmobius.gameserver.managers.FakePlayerChatManager;
 import org.l2jmobius.gameserver.managers.PhantomManager;
 import org.l2jmobius.gameserver.model.World;
@@ -633,11 +634,7 @@ final class DramaEngine
 		if (choice.promoted && (_announceChance > 0) && (Rnd.get(100) < _announceChance))
 		{
 			final String clanName = (profile.getName() != null) ? profile.getName() : ("Clan " + profile.getId());
-			final String announce = brainCustom(speaker, "You have just taken over speaking for your clan " + clanName + " as its " + choice.title + ". Claim the word for your clan in ONE short spoken line; players announce themselves simply, without ceremony.");
-			if (announce != null)
-			{
-				sayToAll(speaker, announce, "delivered [TAKEOVER]");
-			}
+			brainWorld(speaker, "You have just taken over speaking for your clan " + clanName + " as its " + choice.title + ". Claim the word for your clan in ONE short spoken line; players announce themselves simply, without ceremony.", "delivered [TAKEOVER]");
 		}
 
 		// The line is written fresh by the brain at send time, so content
@@ -688,7 +685,33 @@ final class DramaEngine
 		// adapts to the moment rather than to the queue's memory of it. The
 		// brain is REQUIRED: if it cannot answer, this message simply does
 		// not happen - no static text ever stands in for a clan's voice.
-		final String written = brainLine(speaker, profile, kind, other, causeLabel);
+		// THE SEAM: the generation parks a BrainExecutor worker (bounded,
+		// stale-dropping), and delivery hops back onto the game pool - the
+		// game's own timers never wait behind a 45-second answer.
+		try
+		{
+			BrainExecutor.runBrainWork(() ->
+			{
+				final String written = brainLine(speaker, profile, kind, other, causeLabel);
+				ThreadPool.schedule(() -> deliverWritten(speaker, profile, kind, other, clanId, otherClanId, voiceRank, now, retryKey, written), 0);
+			});
+		}
+		catch (Throwable t)
+		{
+			if (_infoHook != null)
+			{
+				_infoHook.accept("clan-personalities: the brain pool refused a beat (" + t + ").");
+			}
+		}
+	}
+
+	/**
+	 * The spoken half of one beat: runs on the game pool after the brain
+	 * answered (or honestly, after it did not - then one retry, and a
+	 * silence that reads as a clansman saying nothing).
+	 */
+	private void deliverWritten(Creature speaker, ClanProfile profile, MessageKind kind, ClanProfile other, int clanId, int otherClanId, int voiceRank, long now, String retryKey, String written)
+	{
 		if (written == null)
 		{
 			// The brain is down, slow or mid-breaker. The exchange itself
@@ -1492,14 +1515,13 @@ final class DramaEngine
 		{
 			return; // the memory faded while we waited
 		}
-		final String text = brainCustom(asker, "Just now, " + clanNameOf(teller) + " mentioned an old quarrel with " + clanNameOf(rival) + ((story.cause != null) ? " about " + story.cause : "") + ", and it was before your time in this server. Ask in ONE short line what that old fight was about - casual and curious, the way a player would ask.");
-		if (text == null)
+		// The question and the two versions are all brain-written, each on
+		// its own beat through the executor seam.
+		brainWorld(asker, "Just now, " + clanNameOf(teller) + " mentioned an old quarrel with " + clanNameOf(rival) + ((story.cause != null) ? " about " + story.cause : "") + ", and it was before your time in this server. Ask in ONE short line what that old fight was about - casual and curious, the way a player would ask.", "delivered [STORY-ASK]", t ->
 		{
-			return; // the brain is down; no question is raised
-		}
-		sayToAll(asker, text, "delivered [STORY-ASK]");
-		ThreadPool.schedule(() -> tellStorySide(teller, rival, story), 9000 + Rnd.get(9000) + spacingHold());
-		ThreadPool.schedule(() -> tellStorySide(rival, teller, story), 27000 + Rnd.get(12000) + spacingHold());
+			ThreadPool.schedule(() -> tellStorySide(teller, rival, story), 9000 + Rnd.get(9000) + spacingHold());
+			ThreadPool.schedule(() -> tellStorySide(rival, teller, story), 27000 + Rnd.get(12000) + spacingHold());
+		});
 	}
 
 	/** One clan's own version of a remembered quarrel. */
@@ -1511,13 +1533,7 @@ final class DramaEngine
 			return; // nobody left in the world to speak for them
 		}
 		final String ending = story.fierce ? "It ended with open threats of settling it on the battlefield." : "It ended in an uneasy peace.";
-		final String text = brainCustom(choice.creature, "Your clan once quarreled with " + clanNameOf(rival) + ((story.cause != null) ? " about " + story.cause : "") + ". " + ending + " Someone just asked in the chat what happened back then. Give YOUR version of what happened: ONE short line, and your clan remembers it their way.");
-		if (text == null)
-		{
-			return;
-		}
-		sayToAll(choice.creature, text, "delivered [STORY]");
-		telling.cooldown(System.currentTimeMillis() + _clanCooldownMillis);
+		brainWorld(choice.creature, "Your clan once quarreled with " + clanNameOf(rival) + ((story.cause != null) ? " about " + story.cause : "") + ". " + ending + " Someone just asked in the chat what happened back then. Give YOUR version of what happened: ONE short line, and your clan remembers it their way.", "delivered [STORY]", t -> telling.cooldown(System.currentTimeMillis() + _clanCooldownMillis));
 	}
 
 	private String clanNameOf(ClanProfile profile)
@@ -1824,15 +1840,7 @@ final class DramaEngine
 			return;
 		}
 		final String prompt = "Not long ago you said out loud: \"" + spokenText + "\". It contained a small typo or slip. Send ONE very short chat line correcting yourself the way players do (like \"I meant ...\" or \"oops, *...*\"). Do not repeat the whole sentence.";
-		ThreadPool.schedule(() ->
-		{
-			final String fix = brainCustom(speaker, prompt);
-			if (fix == null)
-			{
-				return; // the brain is down; the slip stands (it stays natural)
-			}
-			sayToAll(speaker, fix, "delivered [TYPO-FIX]");
-		}, 8000 + Rnd.get(12000) + spacingHold());
+		ThreadPool.schedule(() -> brainWorld(speaker, prompt, "delivered [TYPO-FIX]"), 8000 + Rnd.get(12000) + spacingHold());
 	}
 
 	/**
@@ -1848,6 +1856,59 @@ final class DramaEngine
 			return null;
 		}
 		return _brain.line(speaker.getName(), FakePlayerChatManager.nearestLocation(speaker.getX(), speaker.getY()), (_channel == ChatType.SHOUT) ? "SHOUT" : "SAY", WORLD_LAW + situation + " Answer with ONE line only, in character, plain words, no brackets or markup, nothing that is not spoken out loud in the world.");
+	}
+
+	// ── The brain never blocks the game's threads ─────────────────────────
+	/**
+	 * The compose-and-speak seam: the brain's HTTP turn (ten to forty-five
+	 * seconds) runs on the pack's bounded BrainExecutor - the pool Core
+	 * gave every brain caller for exactly this - and its queue DROPS a
+	 * beat that sat too long, so a stale word never speaks. Delivery hops
+	 * back onto the game pool, so no regen, skill or AI timer ever parks
+	 * behind a generation. An unanswered brain is silence, never a stall.
+	 */
+	private void brainSpeak(Creature speaker, String prompt, String label, Consumer<String> after)
+	{
+		try
+		{
+			final Creature mouth = speaker;
+			BrainExecutor.runBrainWork(() ->
+			{
+				final String text = brainCustom(mouth, prompt);
+				if (text == null)
+				{
+					return; // brain down or slow: this beat stays silent
+				}
+				final String spoken = text;
+				ThreadPool.schedule(() ->
+				{
+					sayToAll(mouth, spoken, label);
+					if (after != null)
+					{
+						after.accept(spoken);
+					}
+				}, 0);
+			});
+		}
+		catch (Throwable t)
+		{
+			if (_infoHook != null)
+			{
+				_infoHook.accept("clan-personalities: the brain pool refused a beat: " + t);
+			}
+		}
+	}
+
+	/** World-chat line on the brain pool, delivered on the game pool. */
+	private void brainWorld(Creature speaker, String prompt, String label)
+	{
+		brainSpeak(speaker, prompt, label, null);
+	}
+
+	/** World-chat line plus a small game-pool follow-up (memory, next beat). */
+	private void brainWorld(Creature speaker, String prompt, String label, Consumer<String> after)
+	{
+		brainSpeak(speaker, prompt, label, after);
 	}
 
 	// ── The other side asks who now speaks ───────────────────────────────
@@ -1875,12 +1936,7 @@ final class DramaEngine
 			return;
 		}
 		final String namedName = (namedClan.getName() != null) ? namedClan.getName() : _unknownClanName;
-		final String text = brainCustom(asker.creature, "The rival clan " + namedName + " keeps switching who speaks for it. Ask them, in ONE short spoken line, who now speaks for their clan - a little suspicious, the way a player would ask.");
-		if (text == null)
-		{
-			return;
-		}
-		sayToAll(asker.creature, text, "delivered [WHO]");
+		brainWorld(asker.creature, "The rival clan " + namedName + " keeps switching who speaks for it. Ask them, in ONE short spoken line, who now speaks for their clan - a little suspicious, the way a player would ask.", "delivered [WHO]");
 	}
 
 	private void deliverLeadershipReply(ClanProfile namedClan, ClanProfile askingClan)
@@ -1892,12 +1948,7 @@ final class DramaEngine
 			return;
 		}
 		final String clanName = (namedClan.getName() != null) ? namedClan.getName() : ("Clan " + namedClan.getId());
-		final String text = brainCustom(talker.creature, "Another clan just asked, out loud, who now speaks for your clan. Introduce yourself in ONE short line: you are the " + talker.title + " of " + clanName + ", and players state their rank simply, with a bit of pride.");
-		if (text == null)
-		{
-			return;
-		}
-		sayToAll(talker.creature, text, "delivered [IDENTIFY]");
+		brainWorld(talker.creature, "Another clan just asked, out loud, who now speaks for your clan. Introduce yourself in ONE short line: you are the " + talker.title + " of " + clanName + ", and players state their rank simply, with a bit of pride.", "delivered [IDENTIFY]");
 	}
 
 	// ── The arc record ───────────────────────────────────────────────────
@@ -1955,22 +2006,19 @@ final class DramaEngine
 			? "This argument is OVER. End it with a short declaration that your clan will answer " + againstName + " on the battlefield - a war cry, not a debate."
 			: "This argument is OVER. End it with a short diplomatic close: your clan lets the quarrel with " + againstName + " rest for now - peace, spoken in few words."
 				+ ((cause != null) ? " The quarrel was mainly about: " + cause + "." : "");
-		final String text = brainCustom(choice.creature, ending);
-		if (text == null)
+		brainWorld(choice.creature, ending, "delivered [" + (fight ? "RESOLVE-FIGHT" : "RESOLVE-PEACE") + "]", t ->
 		{
-			return; // without the brain, the argument just fades out quietly
-		}
-		sayToAll(choice.creature, text, "delivered [" + (fight ? "RESOLVE-FIGHT" : "RESOLVE-PEACE") + "]");
-		// The closing line cools its clan like any other speech.
-		answerProfile.cooldown(System.currentTimeMillis() + _clanCooldownMillis);
-		// The quarrel becomes a war story: retellable long after the anger
-		// fades - a fresh clash overwrites the pair's older memory.
-		if (against != null)
-		{
-			final Story story = new Story(answerProfile.getId(), against.getId(), cause, fight);
-			story.endedAtMillis = System.currentTimeMillis();
-			_warStories.put(arcKey(answerProfile.getId(), against.getId()), story);
-		}
+			// The closing line cools its clan like any other speech.
+			answerProfile.cooldown(System.currentTimeMillis() + _clanCooldownMillis);
+			// The quarrel becomes a war story: retellable long after the anger
+			// fades - a fresh clash overwrites the pair's older memory.
+			if (against != null)
+			{
+				final Story story = new Story(answerProfile.getId(), against.getId(), cause, fight);
+				story.endedAtMillis = System.currentTimeMillis();
+				_warStories.put(arcKey(answerProfile.getId(), against.getId()), story);
+			}
+		});
 	}
 
 	private boolean hasAnyGrudge(int clanId)
@@ -2256,12 +2304,7 @@ final class DramaEngine
 			return; // nobody clan-less in the world right now; the moment passes
 		}
 		final String kind = (clan != null) ? "clan" : "alliance";
-		final String text = brainCustom(asker, "Someone in the world chat used the short name \"" + abbr + "\" for the " + kind + " " + fullname + ", and you have no idea which clan that is. Ask in ONE short line what \"" + abbr + "\" stands for - casual, curious, the way a player would type it.");
-		if (text == null)
-		{
-			return;
-		}
-		sayToAll(asker, text, "delivered [ASK]");
+		brainWorld(asker, "Someone in the world chat used the short name \"" + abbr + "\" for the " + kind + " " + fullname + ", and you have no idea which clan that is. Ask in ONE short line what \"" + abbr + "\" stands for - casual, curious, the way a player would type it.", "delivered [ASK]");
 	}
 
 	/** The named clan - or one present clan of the named alliance - explains. */
@@ -2296,12 +2339,7 @@ final class DramaEngine
 			return; // the named clan left the world; the question dies politely
 		}
 		final String answerName = (answerProfile.getName() != null) ? answerProfile.getName() : String.valueOf(fullname);
-		final String text = brainCustom(talker.creature, "A stranger just asked in the world chat what the short name \"" + abbr + "\" means. Answer in ONE short line, proudly clearing it up: it stands for your clan " + answerName + "; players explain their clan's nickname casually, with a touch of pride.");
-		if (text == null)
-		{
-			return;
-		}
-		sayToAll(talker.creature, text, "delivered [ANSWER]");
+		brainWorld(talker.creature, "A stranger just asked in the world chat what the short name \"" + abbr + "\" means. Answer in ONE short line, proudly clearing it up: it stands for your clan " + answerName + "; players explain their clan's nickname casually, with a touch of pride.", "delivered [ANSWER]");
 	}
 
 	/**
@@ -2311,6 +2349,10 @@ final class DramaEngine
 	 */
 	private Creature pickClanlessVoice()
 	{
+		// Every candidate gets a chance: scanning always picked the FIRST
+		// match, so the same townsperson asked every time. Now the pool is
+		// gathered whole and one voice is drawn at random.
+		final List<Creature> candidates = new ArrayList<>();
 		for (WorldObject object : World.getInstance().getVisibleObjects())
 		{
 			if (object instanceof Npc)
@@ -2318,7 +2360,7 @@ final class DramaEngine
 				final Npc npc = (Npc) object;
 				if (npc.isFakePlayer() && (npc.getFakePlayerAppearance() != null) && (npc.getFakePlayerAppearance().getClanId() == 0))
 				{
-					return npc; // shopkeepers and townsfolk are the natural gossips
+					candidates.add(npc); // shopkeepers and townsfolk are the natural gossips
 				}
 			}
 		}
@@ -2326,10 +2368,10 @@ final class DramaEngine
 		{
 			if (player.isOnline() && ((player.getClan() == null) || !BotClanManager.getInstance().isBotClan(player.getClan())))
 			{
-				return player;
+				candidates.add(player);
 			}
 		}
-		return null;
+		return candidates.isEmpty() ? null : candidates.get(Rnd.get(candidates.size()));
 	}
 
 	// Confirmed for this pack: World.getInstance().getPlayers() works; every
