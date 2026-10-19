@@ -17,8 +17,11 @@
  *
  * Warm model: Ollama unloads the model after five quiet minutes, and a
  * reload costs the next line a full cold generation. A daemon thread pings
- * the brain a hair more often than that, so the model stays pinned and
- * every reply pays warm-turn time only.
+ * the brain a hair more often than that so the model stays pinned - but it
+ * is ARMED ONLY after a successful boot probe (a module that never went
+ * live leaves no thread behind) and it pings ONLY while its gate says
+ * there is someone to talk to: a warm model nobody will use is pure cost
+ * on a metered cloud provider.
  */
 package modules.clanpersonalities;
 
@@ -26,10 +29,13 @@ import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.function.BooleanSupplier;
 
 /**
  * A minimal, blocking, safety-capped, fully serialized client for the FPC
- * brain.
+ * brain. CALLERS run it on the pack's BrainExecutor, never on the game's
+ * own threads: a generation may take tens of seconds and the game's timers
+ * must never wait behind one.
  */
 final class BrainClient
 {
@@ -52,26 +58,54 @@ final class BrainClient
 	private final int _timeoutMillis;
 	private final Object _callLock = new Object();
 	private long _retryAt = 0;
+	private volatile Thread _keeper = null;
+	private volatile boolean _keeperStop = false;
+	/**
+	 * The brain's anti-spam door, config-wired (BrainHumanFlag). While the
+	 * brain only knows that flag, module drama needs it to pass the topic
+	 * cooldowns - see lineLocked's comment. When the brain gains a proper
+	 * mode for module-directed lines, the deployer flips this off.
+	 */
+	private volatile boolean _humanFlag = true;
+	/**
+	 * Reserved handshake for the brain's future "module-directed lines"
+	 * mode (config BrainDirectedHeader): the brain can then keep the whole
+	 * composed prompt OUT of its shared shout log - today that log reads
+	 * our composed beats as if someone had shouted them, and every other
+	 * bot learns our WORLD LAW rules as world chat.
+	 */
+	private volatile String _directedBy = null;
 
 	BrainClient(String url, int timeoutMillis)
 	{
 		_url = url;
 		_timeoutMillis = Math.max(1000, timeoutMillis);
-		armWarmKeeper();
+	}
+
+	/** Which spam-filter doors the module knocks on (config-wired). */
+	void setHeaders(boolean humanFlag, String directedBy)
+	{
+		_humanFlag = humanFlag;
+		_directedBy = (directedBy != null) && !directedBy.isEmpty() ? directedBy : null;
 	}
 
 	/**
 	 * Pins the model in VRAM: one tiny brain turn every 3.5 minutes, well
 	 * inside the five-minute unload timer, so no drama reply ever waits on
-	 * a cold model reload. Daemon thread: it must never keep the game
-	 * server alive, and a downed brain costs it one rejected localhost
-	 * connect every 3.5 minutes - nothing at all.
+	 * a cold model reload. Daemon thread, started ONLY after the boot
+	 * probe succeeded - a module that never went live leaves no thread
+	 * behind, day or night - and every ping first ASKS THE GATE: with nobody
+	 * in the world there is nothing to keep warm, and on a metered cloud
+	 * provider (DeepSeek, OpenAI...) each saved ping is saved money.
 	 */
-	private void armWarmKeeper()
+	void startKeeper(BooleanSupplier gate)
 	{
+		stopKeeper();
+		_keeperStop = false;
+		final BooleanSupplier allow = gate;
 		final Thread keeper = new Thread(() ->
 		{
-			while (true)
+			while (!_keeperStop)
 			{
 				try
 				{
@@ -79,7 +113,11 @@ final class BrainClient
 				}
 				catch (InterruptedException e)
 				{
-					return; // the JVM is going down; go quietly
+					return; // stopped; go quietly
+				}
+				if (_keeperStop || (allow == null) || !allow.getAsBoolean())
+				{
+					continue; // nobody in the world: the model may cool
 				}
 				// Tiny keep-alive probe on the brain's own surface: no
 				// breaker, no logging - a whispered "still there?" that
@@ -90,6 +128,19 @@ final class BrainClient
 		keeper.setName("clan-personalities-brain-keeper");
 		keeper.setDaemon(true);
 		keeper.start();
+		_keeper = keeper;
+	}
+
+	/** Stops the warm-keeper thread (module hot-unload hook). */
+	void stopKeeper()
+	{
+		_keeperStop = true;
+		final Thread keeper = _keeper;
+		if (keeper != null)
+		{
+			keeper.interrupt();
+			_keeper = null;
+		}
 	}
 
 	/**
@@ -124,7 +175,14 @@ final class BrainClient
 			connection.setRequestProperty("Content-Type", "text/plain; charset=utf-8");
 			connection.setRequestProperty("X-FPC", "BrainCheck");
 			connection.setRequestProperty("X-Mode", "SAY");
-			connection.setRequestProperty("X-Human", "true"); // exempt the probe from topic-cooldown kills too
+			if (_humanFlag)
+			{
+				connection.setRequestProperty("X-Human", "true"); // exempt the probe from topic-cooldown kills too
+			}
+			if (_directedBy != null)
+			{
+				connection.setRequestProperty("X-Directed-By", _directedBy); // reserved for the brain's module-directed mode
+			}
 			final byte[] body = "Say OK, nothing else.".getBytes(StandardCharsets.UTF_8);
 			connection.getOutputStream().write(body);
 			final int status = connection.getResponseCode();
@@ -205,9 +263,19 @@ final class BrainClient
 			// MENTIONS it is answered with an empty reply WITHOUT calling the model -
 			// which silently killed our whole exchanges ("talked once, then silence").
 			// Our beats are module-directed drama with their own pacing (hour caps, arc
-			// state), not unmanaged bot loops; mark them human, like the brain exempts a
-			// player's shout: never pass, never cooldown-blocked, never echo-suppressed.
-			connection.setRequestProperty("X-Human", "true");
+			// state), not unmanaged bot loops; while the brain only knows the human
+			// flag, these lines knock on that door (config BrainHumanFlag) - the day
+			// the brain grows a proper module-directed mode, the deployer flips the
+			// flag off and the X-Directed-By header takes over, so the brain can keep
+			// composed prompts out of its shared shout log and re-enable its checks.
+			if (_humanFlag)
+			{
+				connection.setRequestProperty("X-Human", "true");
+			}
+			if (_directedBy != null)
+			{
+				connection.setRequestProperty("X-Directed-By", _directedBy);
+			}
 			if ((location != null) && !location.isEmpty())
 			{
 				connection.setRequestProperty("X-Location", location);

@@ -24,11 +24,14 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ScheduledFuture;
+import java.util.function.BiConsumer;
 import java.util.logging.Logger;
 
 import org.l2jmobius.commons.threads.ThreadPool;
+import org.l2jmobius.gameserver.model.World;
 import org.l2jmobius.gameserver.modules.GameModule;
 import org.l2jmobius.gameserver.modules.ModuleContext;
+import org.l2jmobius.gameserver.modules.ModulesConfig;
 import org.l2jmobius.gameserver.network.enums.ChatType;
 
 /**
@@ -36,8 +39,13 @@ import org.l2jmobius.gameserver.network.enums.ChatType;
  */
 public final class ClanPersonalityModule implements GameModule
 {
+	/** The module's log voice server-side (same channel as context logging). */
+	private static final Logger LOG = Logger.getLogger("module.clan-personalities");
+
 	/** The one shared tick task; kept for the future hot-unload path. */
 	private ScheduledFuture<?> _tickTask;
+	/** The brain handle, kept so a future hot-unload can stop its threads. */
+	private volatile BrainClient _brainClient;
 
 	@Override
 	public void onEnable(ModuleContext context)
@@ -113,19 +121,37 @@ public final class ClanPersonalityModule implements GameModule
 
 		// The FPC brain is REQUIRED. Every spoken line - drama, resolution,
 		// takeover brag, clarify aside, typo fix - is written by it; there
-		// are no static pools to fall back on. Probe once at boot: an
-		// unreachable brain disables the module loudly (an error in the log,
-		// nothing registered), and the server behaves as if it were absent.
-		final BrainClient brain = new BrainClient(context.config().getString("BrainUrl", "http://127.0.0.1:5000/chat"), context.config().getInt("BrainTimeoutMillis", 45000));
-		final String brainError = brain.probe();
-		if (brainError != null)
+		// are no static pools to fall back on. The probe RUNS IN THE
+		// BACKGROUND: a freshly loading Ollama can take minutes to answer,
+		// and the game server must never sit boot-less waiting on it. Until
+		// the probe succeeds the engine simply has no brain - every beat
+		// composes nothing and the module is silent, which is exactly the
+		// "stays inactive" contract held while the server starts.
+		_brainClient = new BrainClient(context.config().getString("BrainUrl", "http://127.0.0.1:5000/chat"), context.config().getInt("BrainTimeoutMillis", 45000));
+		// Which spam-filter doors the drama lines knock on (see BrainClient):
+		// the human flag is still needed while the brain lacks a directed-
+		// lines mode; X-Directed-By is always announced for that future mode.
+		_brainClient.setHeaders(context.config().getBoolean("BrainHumanFlag", true), context.config().getString("BrainDirectedHeader", "clan-personalities"));
+		final DramaEngine bootEngine = engine;
+		final BrainClient bootBrain = _brainClient;
+		final Thread probeThread = new Thread(() ->
 		{
-			context.logging().severe("clan-personalities ERROR: the FPC brain is unreachable (" + brainError + ").");
-			context.logging().severe("clan-personalities: this module's voice is entirely brain-written and REQUIRES the brain at " + context.config().getString("BrainUrl", "http://127.0.0.1:5000/chat") + ". Start brain\\fpc_brain.py (Ollama) and restart the game server. Until then the module stays inactive and the server behaves as if it were absent.");
-			return;
-		}
-		context.logging().info("clan-personalities: FPC brain reachable - the module's voice is entirely brain-written.");
-		engine.setBrain(brain);
+			final String brainError = bootBrain.probe();
+			if (brainError != null)
+			{
+				context.logging().severe("clan-personalities ERROR: the FPC brain is unreachable (" + brainError + ").");
+				context.logging().severe("clan-personalities: this module's voice is entirely brain-written and REQUIRES the brain at " + context.config().getString("BrainUrl", "http://127.0.0.1:5000/chat") + ". Start brain\\fpc_brain.py (Ollama) and restart the game server. Until then the module stays inactive and the server behaves as if it were absent.");
+				return;
+			}
+			context.logging().info("clan-personalities: FPC brain reachable - the module's voice is entirely brain-written.");
+			bootEngine.setBrain(bootBrain);
+			// The warm-keeper starts only NOW - a successful probe, and
+			// gated on actual players: with nobody in the world the model
+			// is allowed to cool, which costs nothing between sessions.
+			bootBrain.startKeeper(() -> !World.getInstance().getPlayers().isEmpty());
+		}, "clan-personalities-boot-probe");
+		probeThread.setDaemon(true);
+		probeThread.start();
 
 		// Where clan speech goes: SHOUT = visible everywhere (world chat),
 		// GENERAL = the nearby bubble only. Also how the brain is addressed.
@@ -161,6 +187,16 @@ public final class ClanPersonalityModule implements GameModule
 		// own version. Memories outlive grudges by design.
 		engine.setStories(context.config().getInt("HistoryChance", 6), context.config().getInt("StoryAskChance", 45), context.config().getInt("StoryWindowMinutes", 360) * 60000L);
 
+		// Phase 2: field encounters - clan members physically stepping on
+		// each other's toes in the open field: a real duel staged OUTSIDE
+		// town zones, the world hearing the opener, a spectator line, and
+		// both sides' closing words (the loser may blame its idle alliance).
+		if (context.config().getBoolean("Phase2", false))
+		{
+			engine.setEncounters(context.config().getInt("EncounterChance", 25), context.config().getInt("EncounterScanRadius", 700), context.config().getInt("EncounterFightMaxSeconds", 90), context.config().getInt("EncounterCrowdChance", 60), context.config().getInt("LoserBlameChance", 50));
+			context.logging().info("clan-personalities: Phase 2 field encounters armed (base chance " + context.config().getInt("EncounterChance", 25) + "% per drama tick, radius " + context.config().getInt("EncounterScanRadius", 700) + "m).");
+		}
+
 		// Drama arcs: arguments run a few beats and must end with a
 		// "solution" - a war cry or a diplomatic close - after which the pair
 		// rests a random while before a new argument. The brain writes those
@@ -183,6 +219,46 @@ public final class ClanPersonalityModule implements GameModule
 			}
 		}
 		engine.setAbbreviationOverrides(abbreviationOverrides);
+
+		// Funny clan nicknames ("Ivory_Crown=Ivy Crown") get their own roll
+		// in speech, and the clarify chatter may ask about the fun name.
+		// Clarifications stay rare: a chance roll first, then the
+		// once-per-mention-per-window gates keep it at most one per clan.
+		// Hand-tuned names (ini) outrank the brain's coined ones; the brain
+		// fills in every clan that has neither. Coined names are persisted
+		// to nicknames.properties in the module folder, so slang sticks.
+		final Map<String, String> clanNicknames = loadBrainNicknames();
+		for (String part : context.config().getString("ClanNicknames", "").split(","))
+		{
+			part = part.trim();
+			final int equals = part.indexOf('=');
+			if (equals > 0)
+			{
+				clanNicknames.put(DramaEngine.normalizeClanToken(part.substring(0, equals).trim()), part.substring(equals + 1).trim());
+			}
+		}
+		engine.setNicknames(clanNicknames, context.config().getInt("NicknameChance", 45));
+		engine.setClarifyChance(context.config().getInt("ClarifyChance", 40));
+		engine.setNicknameDrift(context.config().getInt("NicknameDriftChance", 4), ClanPersonalityModule::saveBrainNickname);
+
+		// Challenges: trash talk that dares ("bring it") earns a persona
+		// reply - and with some odds becomes a REAL field duel at the gates.
+		final List<String> challengeCues = new ArrayList<>();
+		for (String cue : context.config().getString("ChallengeCues", "come fight me,bring it,fight me,meet me outside,catch me outside").split(","))
+		{
+			cue = cue.trim().toLowerCase();
+			if (!cue.isEmpty())
+			{
+				challengeCues.add(cue);
+			}
+		}
+		engine.setChallengeCues(challengeCues, context.config().getInt("ChallengeFightChance", 35));
+		engine.setGuardClearRadius(context.config().getInt("GuardClearRadius", 900));
+		engine.setFieldLeadSeconds(context.config().getInt("FieldLeadSeconds", 90));
+		engine.setFieldHeralds(context.config().getInt("FieldHeralds", 5));
+		engine.setPlayerGrace(context.config().getInt("PlayerGraceRadius", 3000), context.config().getInt("PlayerRoadRadius", 2200), context.config().getInt("PlayerGraceMaxSeconds", 180) * 1000L);
+		engine.setSkirmishCooldowns(context.config().getInt("SkirmishCooldownSeconds", 240) * 1000L, context.config().getInt("SkirmishHeatStepSeconds", 90) * 1000L);
+		engine.setBrewRequirements(context.config().getInt("BrewBeatsForSteel", 3), context.config().getInt("BrewWindowSeconds", 900), context.config().getInt("BrewMinSeconds", 90));
 
 		// Clan voices: each clan keeps its leader/officer/member roles stable
 		// (derived from names), the talker keeps the word, senior ranks take
@@ -248,6 +324,14 @@ public final class ClanPersonalityModule implements GameModule
 		{
 			_tickTask.cancel(false);
 			_tickTask = null;
+		}
+		// The warm-keeper must not outlive the module: on a cloud brain every
+		// ping after shutdown is money spent for nobody.
+		final BrainClient brain = _brainClient;
+		if (brain != null)
+		{
+			brain.stopKeeper();
+			_brainClient = null;
 		}
 	}
 
@@ -393,19 +477,108 @@ public final class ClanPersonalityModule implements GameModule
 
 	// ── STABLE persona storage (personas.properties in the module folder) ──
 
-	/** The module folder resolves from the game server's working directory. */
+	/**
+	 * The module folder resolves from the pack's module registry root
+	 * (ModulesConfig) - never a working-directory guess made by whatever
+	 * launched the server. Old pack builds without the registry fall back
+	 * to the relative modules folder.
+	 */
 	private static File personaStateFile()
 	{
-		File dir = new File("modules", "clan-personalities");
+		File dir = new File(ModulesConfig.getModulesRoot(), "clan-personalities");
 		if (!dir.isDirectory())
 		{
-			final File fallback = new File(System.getProperty("user.dir"), "modules" + File.separator + "clan-personalities");
+			final File fallback = new File("modules", "clan-personalities");
 			if (fallback.isDirectory())
 			{
 				dir = fallback;
 			}
 		}
 		return new File(dir, "personas.properties");
+	}
+
+	// ── Brain-coined clan nicknames (nicknames.properties persists them) ──
+
+	/** Where the world's coined slang lives, next to the persona deal. */
+	private static File nicknameStateFile()
+	{
+		File dir = new File(ModulesConfig.getModulesRoot(), "clan-personalities");
+		if (!dir.isDirectory())
+		{
+			final File fallback = new File("modules", "clan-personalities");
+			if (fallback.isDirectory())
+			{
+				dir = fallback;
+			}
+		}
+		return new File(dir, "nicknames.properties");
+	}
+
+	/** Loads the brain's coined nicknames (normalizedToken=nickname lines).
+	 *  A missing or unreadable file simply means the world starts clean. */
+	private static Map<String, String> loadBrainNicknames()
+	{
+		final Map<String, String> stored = new LinkedHashMap<>();
+		final File file = nicknameStateFile();
+		if (!file.isFile())
+		{
+			return stored;
+		}
+		BufferedReader reader = null;
+		try
+		{
+			reader = new BufferedReader(new InputStreamReader(new FileInputStream(file), StandardCharsets.UTF_8));
+			String line;
+			while ((line = reader.readLine()) != null)
+			{
+				line = line.trim();
+				if (line.isEmpty() || line.startsWith("#"))
+				{
+					continue;
+				}
+				final int equals = line.indexOf('=');
+				if (equals > 0)
+				{
+					stored.put(line.substring(0, equals).trim(), line.substring(equals + 1).trim());
+				}
+			}
+		}
+		catch (Exception e)
+		{
+			LOG.finest("clan-personalities: could not load nicknames (" + e + "); starting clean.");
+		}
+		finally
+		{
+			if (reader != null)
+			{
+				try
+				{
+					reader.close();
+				}
+				catch (Exception ignored)
+				{
+				}
+			}
+		}
+		return stored;
+	}
+
+	/** Persists one coined nickname; failure is a log whisper, never a crash. */
+	private static void saveBrainNickname(String token, String nickname)
+	{
+		final File file = nicknameStateFile();
+		try (PrintWriter writer = new PrintWriter(new OutputStreamWriter(new FileOutputStream(file, true), StandardCharsets.UTF_8)))
+		{
+			if (!file.isFile())
+			{
+				writer.println("");
+			}
+			writer.println(token + "=" + nickname);
+		}
+		catch (Exception e)
+		{
+			LOG.finest("clan-personalities: could not save nickname (" + e + "); the coin lives only for this run.");
+		}
 	}
 
 	/**

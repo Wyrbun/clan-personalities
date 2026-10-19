@@ -1,9 +1,10 @@
-# Clan Personalities (`clan-personalities`) — Phase 1
+# Clan Personalities (`clan-personalities`)
 
 Module notes for whoever maintains the server. Written against the Living World Module
 Framework (`docs/MODULE_FRAMEWORK.md`, `docs/MODULE_AUTHORING_GUIDE.md`).
-**Current version is Phase 1, "the drama": chat only.** No combat behavior of any kind
-ships here — see the Phases section.
+**Current version: 0.1.x.** The shipped default is Phase 1, "the drama": chat only.
+The Phase 2 field-duel code is present behind `Phase2 = False` in the ini and does
+nothing until you flip that switch — see the Phases section.
 
 ## What it does
 
@@ -20,18 +21,21 @@ features" split — dramatic voice only, no mechanics):
 | NEUTRAL | never | yes | **never** (never assists brothers — per concept) | — |
 | ALTRUISTIC | rarely | yes | yes, even when the brother started it | — |
 | AGGRESSIVE | eagerly | yes | yes | may pile on others' drama; grudges double its appetite |
-| PLAYER_KILLING | like Aggressive | yes | yes | combat behavior is a later phase, not shipped here |
+| PLAYER_KILLING | like Aggressive | yes | yes | combat behavior is Phase 2 (field duels), behind `Phase2` |
 
 Anti-clutter rules (all config):
 - At most `MaxClansPerPersona` clans share a persona in RANDOM mode; leftover clans stay silent.
-- Everyone speaks through a shared queue: each message waits a random 1–8 minutes.
+- Everyone speaks through a shared queue with randomized delay bands; ONGOING arguments
+  pace themselves by rank (`Leader/Officer/MemberReplyBand`).
 - Global cap `MaxMessagesPerHour` — extras are postponed, never dropped.
-- A clan that spoke goes silent `ClanCooldownMinutes`.
+- A clan that spoke goes silent `ClanCooldownSeconds`.
 - A third-party aggressive pile-on only with `OpportunisticChance`, and at most
   `MaxResponsesPerDrama` clans answer one opening.
-- Replies never chain further, so an argument always runs one round and ends.
+- Exchanges DO chain in a human shape (question → explanation → comeback, asides,
+  self-correction), but every kind is paced by the global `MinBeatSpacingSeconds`
+  floor and the queue, so the world reads one line at a time.
 
-Memory (RAM, this phase): a bounded ring of recent exchanges, used to (a) double the
+Memory (RAM): a bounded ring of recent exchanges, used to (a) double the
 drama appetite of grudge-holders, and does not persist across restarts — hence no SQL.
 
 ## Clan identification
@@ -53,8 +57,8 @@ the authoritative fallback when a key is ambiguous.
 
 ## The LLM tier (FPC brain)
 
-The pack ships an optional local brain (`brain\fpc_brain.py`, Flask + Ollama /
-DeepSeek; endpoint `http://127.0.0.1:5000/chat`). When `UseBrain = True`, the
+The pack ships a local brain (`brain\fpc_brain.py`, Flask + Ollama / DeepSeek;
+endpoint `http://127.0.0.1:5000/chat`). The brain is REQUIRED, not optional: the
 module asks it to write each outgoing line (`POST /chat`, headers `X-FPC` =
 the speaking member's real name so the brain keeps its stable voice,
 `X-Mode`, `X-Location`; body = a composed situation prompt that includes clan
@@ -63,22 +67,34 @@ The brain already enforces single-line, tag-free replies; the module re-checks
 length and newlines regardless.
 
 Failure contract (the reason this is safe):
-- **Unavailable/slow/error** → the configured line pools answer that message
-  unchanged; the module pauses brain attempts for 10 minutes afterward.
+- **Unavailable/slow/error** → that one line is skipped, retried once quickly,
+  and then honestly dropped: a downed brain makes the clans hold their tongues.
+  Nothing static is ever spoken in their place; the breaker pauses attempts
+  for 60 seconds only.
 - All tempo rules stay module-owned: personas, queue, caps, cooldowns decide
   who speaks when; the brain decides only the words.
-- The brain being off (it is optional by the pack's design, see
-  `brain\README.md`) degrades tone, never behavior.
+- The brain being off degrades the world to silence, never to canned text.
+
+Threading (0.1.x): every brain generation runs on the pack's own
+`BrainExecutor` (the bounded, stale-dropping pool every other brain caller
+uses). The game's shared scheduled threads — regen, skill, AI timers — never
+wait behind a 45-second answer; a beat that sat in the brain pool longer than
+20 s is dropped as stale instead of speaking late. The boot probe also runs in
+the background, so a cold Ollama cannot stall server start; the module speaks
+once the probe answers. The warm-keeper thread (keeps the model pinned in
+VRAM, one tiny ping per 3.5 min) starts ONLY after that successful probe and
+pings ONLY while players are actually online — on a metered cloud brain, the
+model is allowed to cool between sessions.
 
 ## Layout
 
 ```text
 clan-personalities/
   module.json                  # manifest; empty reserves, no database, no hooks
-  config/module.ini            # master switch + personas + tempo + line pools
+  config/module.ini            # master switch + personas + tempo + brain dials
   scripts/
     ClanPersonalityModule.java # entry point (GameModule), modules.clanpersonalities
-    BrainClient.java           # optional LLM tier; talks to the pack's FPC brain
+    BrainClient.java           # the required LLM tier; talks to the pack's FPC brain
     DramaEngine.java           # the engine: resolution, rolls, gates, reactions
     ClanSpec.java              # configured clan: token/id + persona + group
     ClanProfile.java           # resolved clan: name, cooldown, presence
@@ -151,9 +167,9 @@ Resolved by reading `GameServer.jar` (`javap`); these are no longer guesses:
   (`%ABB%`, `%CLAN%`). Choices of asker: crest-less fake players first, then
   living-population phantoms; never the human player.
 - Brain transparency: `BrainClient.probe()` logs one boot-time reachability
-  verdict; delivered lines report their source as `brain` or `pool`, and a
-  `brain miss` line explains each fallback. `parseLines` strips wrapping
-  quotation marks, so quoted config entries never leak `"` into chat.
+  verdict (run on a background thread, never blocking server start), and a
+  `brain miss` log line explains each honestly-dropped line. No line pool
+  exists anywhere in the module anymore.
 
 
 ## Phase roadmap
@@ -191,7 +207,7 @@ Resolved by reading `GameServer.jar` (`javap`); these are no longer guesses:
   brain...") and the module stays inactive; the server remains stock.
 - **Runtime outage → silence, never substitution.** A brain miss skips that
   one line (logged as `brain miss ... line skipped` when Debug is on) and
-  the circuit breaker sleeps 10 minutes before the next attempt. A downed
+  the circuit breaker pauses attempts for 60 seconds. A downed
   brain makes the clans hold their tongues; it never plays canned text.
 - **Offense causes are now plain-language labels** (`OffenseCauses`,
   comma-separated, fed verbatim to the brain as "the quarrel is really
@@ -325,3 +341,44 @@ Resolved by reading `GameServer.jar` (`javap`); these are no longer guesses:
   bystander may ask what happened - and then BOTH clans give their own
   version, each brain-written, each remembering it their way. Fresh
   quarrels overwrite the pair's older story.
+
+## 0.1.x hardening round (tester feedback incorporated)
+
+- **No more brain calls on the game's threads.** Every composed line - the
+  main drama beats, field-duel words, heralds, crowd, stories, clarifications,
+  resolutions, challenge replies - is composed on the pack's `BrainExecutor`
+  and delivered back on the game pool. The game's shared scheduled threads
+  (regen, skills, AI, the drama tick) never park behind an HTTP generation,
+  and beats that would speak after 20 s of waiting are dropped stale by the
+  pack's own pool instead of talking late.
+- **The boot probe can no longer stall server start.** The probe (two
+  attempts, up to ~105 s combined against a cold Ollama) runs on a background
+  thread; the server boots immediately and the module goes live when the
+  brain answers. A failing probe logs the same SEVERE verdict and the module
+  stays silent rather than disabled-after-boot.
+- **The warm-keeper is honest about costs.** It is armed only after a
+  successful probe (a module that never went live leaves no thread running),
+  it pings only while players are actually online (`World` player check), and
+  it stops on module disable. On a metered cloud brain the model cools when
+  nobody is around instead of pinging on server time forever.
+- **`X-Human` is now a switch, with a handshake reserved.** `BrainHumanFlag`
+  (default `True`) keeps today's behavior: drama lines pose as human speech
+  because the brain's topic cooldowns otherwise killed whole exchanges. The
+  module always also sends `X-Directed-By: <BrainDirectedHeader>` so that the
+  brain's upcoming module-directed mode can be adopted without a code change
+  - flip `BrainHumanFlag = False` then, and the brain can keep composed
+  prompts out of its shared shout log and re-enable its checks.
+- **State files resolve through the module registry.** `personas.properties`
+  and `nicknames.properties` are read/written via `ModulesConfig.getModulesRoot()`
+  instead of a working-directory guess; old pack builds keep the relative
+  fallback.
+- **Bystanders rotate.** The clarify/story asker used to be the first
+  clan-less NPC found in a world scan - always the same shopkeeper. The full
+  candidate pool is gathered first and one voice is drawn at random.
+- **Phase 2 rides along, switched off.** The field-duel engine (arenas,
+  marches, gear fairness, spectators, skirmish bank, brew gate) ships in the
+  code but is entirely inert until `Phase2 = True` in the ini. Pack-side note:
+  the `placeShopkeeper` NPE seen once per Living Population tick comes from
+  the PACK's own `LivingPopulationManager.safeSnapshotTick` (a template id is
+  `null` for a placed shopkeeper) - it predates this module, is harmless, and
+  is unrelated to anything here.

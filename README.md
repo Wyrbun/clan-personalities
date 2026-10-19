@@ -59,7 +59,7 @@ Personas are dealt once and kept between restarts (`personas.properties`, writte
 
 ## How it behaves
 
-- **Personas**: Peaceful never starts anything and answers provocation with exactly one calm line; Neutral defends only its own name; Altruistic answers for any clan under its alliance banner, even when the brother threw the first stone; Aggressive starts fights and drags its alliance in; Player-Killing talks like Aggressive (its field behavior comes in a later phase).
+- **Personas**: Peaceful never starts anything and answers provocation with exactly one calm line; Neutral defends only its own name; Altruistic answers for any clan under its alliance banner, even when the brother threw the first stone; Aggressive starts fights and drags its alliance in; Player-Killing talks like Aggressive (Phase 2 field brawls ride in the code behind the `Phase2` switch, off by default).
 - **The world witnesses it**: the default channel is SHOUT — world chat. Pack bots and real players react to the drama, and clan-less bystanders may ask what a nickname means, or what an old war was about.
 - **Proper exchanges** (`QuestionChance`): the called-out clan may first demand *"what do you want from us?"* — the accuser explains its side (grounded in a concrete incident like *kill-stealing mobs* or *spawn camping*), and only then comes the comeback. Every question earns an answer.
 - **One voice per clan**: the SAME bot keeps arguing a quarrel while he is present. A present higher rank may take over and introduce himself; if a clan keeps switching talkers, the other side may ask who now speaks — once per argument.
@@ -150,7 +150,43 @@ All in `modules/clan-personalities/config/module.ini`. Values below are the ship
 |---|---|---|
 | `BrainUrl` | `http://127.0.0.1:5000/chat` | The pack's FPC brain endpoint |
 | `BrainTimeoutMillis` | `45000` | One generation can legitimately take 20–40 s; keep ≥ 45000 |
+| `BrainHumanFlag` | `True` | Drama lines knock on the brain's anti-spam door as human speech (see MODULE.md). Flip to `False` when the brain ships its module-directed mode |
+| `BrainDirectedHeader` | `clan-personalities` | Sent as `X-Directed-By` on every request — the reserved handshake for that future brain mode |
 | `MemorySize` | `60` | Recent lines retained in RAM for adaptation |
+
+## What's new in 0.1.1
+
+Production hardening, driven by a real reviewer's test report — no new drama features:
+
+- **The game server's threads are never blocked by the brain anymore.** Every
+  generation (drama beats, field-duel words, heralds, crowd, stories,
+  clarifications, resolutions) is composed on the pack's own bounded
+  `BrainExecutor` — the pool every other brain caller already uses — and
+  delivered back on the game pool. A busy drama can no longer park the
+  server's shared scheduled threads (regen, skills, AI timers), and beats
+  that would arrive over 20 s late are dropped instead of speaking stale.
+- **Server start can no longer stall on the boot probe.** The probe (which
+  can legitimately take ~105 s against a cold Ollama) runs on a background
+  thread; the server boots immediately and the clans go live when the brain
+  answers.
+- **The warm-keeper can't cost money for nobody.** The pin-the-model thread
+  starts ONLY after a successful boot probe (a module that never went live
+  leaves no thread behind), pings ONLY while players are actually online, and
+  stops on module disable. With a metered cloud brain (DeepSeek, OpenAI, …),
+  the model cools while no one is playing instead of pinging around the clock.
+- **`X-Human` became a switch.** The module still poses drama lines as human
+  speech by default (the brain's topic cooldowns otherwise kill whole
+  exchanges), but `BrainHumanFlag = False` turns that off the day the brain
+  gains its module-directed mode — the module already announces
+  `X-Directed-By` on every request as the handshake for it.
+- **State files follow the module registry.** `personas.properties` and
+  `nicknames.properties` are found via `ModulesConfig.getModulesRoot()`, not
+  whatever working directory the server happened to start from.
+- **Bystanders rotate.** The clan-less asker (clarify and story beats) is now
+  drawn at random from every candidate in the world instead of always the
+  first shopkeeper a scan found.
+- The release zip no longer contains any `.git` folder (repository hygiene;
+  `pack-release.ps1` builds it that way).
 
 ## Tuning guide
 
@@ -174,9 +210,9 @@ All in `modules/clan-personalities/config/module.ini`. Values below are the ship
 
 ## Roadmap
 
-- **Phase 1 — chat drama** *(this release)*: conversation engine, exchanges, kindness, war stories.
-- **Phase 2 — combat reactivity**: clans that actually notice fights in the field and talk about what they *saw*.
-- **Phase 3 — altruistic assists**: personas acting in the world, not only speaking.
+- **Phase 1 — chat drama**: conversation engine, exchanges, kindness, war stories. *(shipped)*
+- **Phase 2 — field duels**: equal-gear clan brawls staged in the field outside major towns, march/run theaters, herald trails, spectator crowds, a fight bank that makes fights earned and paced. *(in the code behind `Phase2 = True`; validated release to follow as 0.2.0)*
+- **Phase 3 — deployment politics**: PK-punishment hunts, adena bounties, ally assists: personas acting in the world, not only speaking.
 
 ## License
 

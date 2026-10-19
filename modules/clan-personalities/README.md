@@ -9,26 +9,30 @@ Five temperaments are dealt to your living clans (or you assign them yourself):
 - **Neutral** — defends its own name, but will never lift a finger for an alliance brother.
 - **Altruistic** — answers for any clan wearing its banner… even when its brother threw the first stone.
 - **Aggressive** — starts fights on purpose, drags its alliance in, remembers who stood by.
-- **Player-Killing** — talks like Aggressive; its field behavior (hunting, stalking) comes in a later phase.
+- **Player-Killing** — talks like Aggressive; its field behavior (hunting, stalking) rides Phase 2.
 
-**Phase 1 is chat only**: persona drama in world chat, ambient chatter, memory of
+**By default this is the chat drama**: persona drama in world chat, ambient chatter, memory of
 previous arguments (they come back hungrier for their rivals), and heavy anti-clutter
-rules so your chat stays readable. **No combat is touched.** Real clan wars, PvP and
-damage stay 100% stock; these clans are mouth, not blade — for now.
+rules so your chat stays readable. Real clan wars, PvP and damage stay 100% stock; these
+clans are mouth, not blade — by default. The Phase 2 field-duel engine (equal-gear clan
+brawls outside the towns, with heralds, crowds and a fair-callout economy) is already in
+the code and wakes up with `Phase2 = True` in `config/module.ini`.
 
-## The brain writes the words (optional, on by default)
+## The brain writes the words (required — there are no line pools)
 
-This module talks to the pack's optional **FPC brain** (`brain\fpc_brain.py`,
-local Ollama - `UseBrain = True` in config). When the brain is up, clan lines
-are **generated live** with the speaking bot's own in-character voice - so
-feuds sound organic instead of canned, and replies actually continue previous
-arguments. Clan speech goes to the **world chat (SHOUT)** channel, visible
-everywhere, so you can witness it wherever you are (`ChatChannel = SHOUT`).
+This module talks to the pack's **FPC brain** (`brain\fpc_brain.py`, local Ollama or a
+cloud provider behind it). Clan lines are **generated live** with the speaking bot's
+own in-character voice - so feuds sound organic instead of canned, and replies actually
+continue previous arguments. Clan speech goes to the **world chat (SHOUT)** channel,
+visible everywhere, so you can witness it wherever you are (`ChatChannel = SHOUT`).
 
-If the brain is off, unreachable, or slow: nothing breaks - the module quietly
-falls back to the configured line pools, and retries the brain later. All
-limits (hour cap, cooldowns, queues) still apply; you can lower volume before
-you lower anything else if a `12b`-class model makes lines arrive slower.
+If the brain is unreachable at server start, the module logs an ERROR and stays
+inactive (start the brain, then restart the server - no need to reboot the machine,
+the probe runs in the background). If the brain dies mid-game, the clans simply hold
+their tongues until it answers again - nothing canned is ever spoken in their place.
+All limits (hour cap, cooldowns, queues) still apply; lower `MaxMessagesPerHour` first
+if a `12b`-class model (or a paid cloud brain) makes lines come slow or costs too much:
+fewer lines, less wait, less spend.
 
 ## Install
 
@@ -58,11 +62,8 @@ meet again. If a clan has no members actually in the world, it says nothing.
 - `MaxMessagesPerHour` caps all clan chat globally.
 - `MinBeatSpacingSeconds` is the human read-and-type floor between any two clan lines.
 - `LeaderReplyBand` / `OfficerReplyBand` / `MemberReplyBand` set how fast arguments breathe.
-- `ClanCooldownMinutes` keeps any one clan from dominating.
+- `ClanCooldownSeconds` keeps any one clan from dominating.
 - `MaxResponsesPerDrama` limits how many clans pile in.
-- `MinMessageDelayMinutes` / `MaxMessageDelayMinutes` spread the queue.
-- Lower `DramaStartChance` for a lazier world; lower `AmbientChance` for less chatter.
-- Every clan line is editable in `config/module.ini` (`PlayerKillerAmbient = ...` etc.).
 
 ## Uninstall
 
@@ -79,7 +80,14 @@ module folder. Nothing is stored in the database, so removal is a clean delete.
   pools. If the brain is not running at server start, the module logs an
   ERROR and stays inactive (start the brain, restart the server). If the
   brain dies mid-game, the clans simply hold their tongues until it answers
-  again — nothing canned is spoken in their place.
+  again — nothing canned is spoken in their place. The boot probe and every
+  brain turn run on the pack's own brain pool, so a slow model can never
+  stall the server or its timers.
+- **Warm-keeper economy**: the module keeps the model pinned in VRAM with a
+  tiny ping every 3.5 minutes — but only after the brain answered once at
+  boot, and only while players are actually online. With nobody in the world
+  (or after the module is disabled) the ping stops, which matters if your
+  brain is a metered cloud API (DeepSeek, OpenAI and friends).
 - Typos: bot lines are kept exactly as the brain writes them — mistypes and
   all, like real players. Occasionally (rare, `SelfCorrectionChance`) a bot
   noticeably slips and then corrects itself in chat a few seconds later.
