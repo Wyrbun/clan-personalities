@@ -382,3 +382,15 @@ Resolved by reading `GameServer.jar` (`javap`); these are no longer guesses:
   the PACK's own `LivingPopulationManager.safeSnapshotTick` (a template id is
   `null` for a placed shopkeeper) - it predates this module, is harmless, and
   is unrelated to anything here.
+- **Arena siting learned to read the map instead of drawing lines.** The old
+  scan marched 16 blind compass rays out of the town's Gatekeeper and demanded
+  each whole straight line be walkable, which quietly dropped towns whose
+  geometric center has no clean lane in a compass direction. The scan now
+  anchors on the pack's own gate GUARDS and SENTRIES standing outside the
+  walls: those soldiers mark the real road mouths (reachable, open, dry
+  ground), and the piste is placed a stretch further down the road each
+  guards. The first pass still prefers a perfectly straight trail from the
+  Gatekeeper so the herald breadcrumb stays honest; a second pass accepts
+  bent ground walked out of the door itself, since the march column
+  path-finds on its own and the herald posts already step back toward town on
+  blocked lines. The old ray march remains as the last fallback.
