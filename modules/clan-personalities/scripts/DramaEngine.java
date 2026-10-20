@@ -87,6 +87,8 @@ import org.l2jmobius.gameserver.model.actor.instance.Monster;
 import org.l2jmobius.gameserver.model.actor.holders.npc.FakePlayerAppearance;
 import org.l2jmobius.gameserver.model.itemcontainer.Inventory;
 import org.l2jmobius.gameserver.model.item.instance.Item;
+import org.l2jmobius.gameserver.model.zone.ZoneId;
+import org.l2jmobius.gameserver.model.actor.Summon;
 import org.l2jmobius.gameserver.model.zone.type.TownZone;
 import org.l2jmobius.gameserver.model.zone.type.WaterZone;
 import org.l2jmobius.gameserver.livingpop.LivingPopulationManager;
@@ -351,6 +353,11 @@ final class DramaEngine
 		int talkBeats = 0;
 		/** Casters' beats in a row with nothing to cast. */
 		final Map<String, Integer> casterDry = new ConcurrentHashMap<>();
+		/** Fans' clans by object id (from their town bot), so a fan of the
+		 *  fighting clans or their alliances can be told apart. */
+		final Map<Integer, Integer> fanClans = new ConcurrentHashMap<>();
+		/** A real player broke in: the cast was handed to a ZeldaChickens hunt. */
+		volatile boolean zelda;
 		/** Buffs each support fighter has cast this duel (capped). */
 		final Map<String, Integer> supportBuffs = new ConcurrentHashMap<>();
 		/** Both clans belong to the SAME alliance: brothers turning on each other. */
@@ -4347,16 +4354,14 @@ final class DramaEngine
 		{
 			return;
 		}
-		final ClanProfile voiceClan = pickFieldCrowd(_profiles.get(fight.clanAId), _profiles.get(fight.clanBId));
-		if (voiceClan == null)
+		// Only someone AT the arena and tied to the fight spreads the word.
+		final Creature where = duelVoice(fight, 0);
+		if (where == null)
 		{
 			return;
 		}
-		final VoiceChoice choice = chooseVoice(voiceClan);
-		if (choice == null)
-		{
-			return;
-		}
+		final ClanProfile voiceClan = _profiles.get(Integer.valueOf(((where instanceof Player) && fight.sideB.contains(where)) ? fight.clanBId : fight.clanAId));
+		final VoiceChoice choice = new VoiceChoice(where, 0, "", false);
 		final String moment = alreadyStarted ? "a REAL clan fight is underway RIGHT NOW" : "a REAL clan fight starts within the minute";
 		final String walk = walkWord(fight);
 		// The compose + address-check + retry flow runs whole on a brain
@@ -5746,7 +5751,18 @@ final class DramaEngine
 		}
 		final int wanted = 4 + Rnd.get(3); // 4..6 fans
 		final Collection<WaterZone> waters = ZoneManager.getInstance().getAllZones(WaterZone.class);
-		for (FakePlayerAppearance appearance : identityBook(60))
+		// Most of the crowd is whoever wandered by - clanless folk and other
+		// clans love a brawl. A seat or two may go to the fighting clans' own
+		// people or their alliance, come to cheer (and to tell the world).
+		final List<FakePlayerAppearance> kin = kinFanBook(fight, taken);
+		final int kinSeats = (kin.isEmpty() || (Rnd.get(100) >= 60)) ? 0 : ((wanted >= 6) && (Rnd.get(100) < 40) ? 2 : 1);
+		final List<FakePlayerAppearance> seats = new ArrayList<>();
+		for (int i = 0; (i < kinSeats) && (i < kin.size()); i++)
+		{
+			seats.add(kin.get(i));
+		}
+		seats.addAll(identityBook(60));
+		for (FakePlayerAppearance appearance : seats)
 		{
 			if (fight.spectators.size() >= wanted)
 			{
@@ -5774,6 +5790,11 @@ final class DramaEngine
 				}
 				pm.setLivingIdle(fan, true);
 				fight.spectators.add(fan);
+				taken.add(appearance.getName());
+				if (appearance.getClanId() > 0)
+				{
+					fight.fanClans.put(Integer.valueOf(fan.getObjectId()), Integer.valueOf(appearance.getClanId()));
+				}
 			}
 			catch (Exception e)
 			{
@@ -5787,6 +5808,39 @@ final class DramaEngine
 		{
 			_infoHook.accept("clan-personalities: [SPECTATORS] " + fight.spectators.size() + " fans ring the field at " + fight.arenaX + "," + fight.arenaY + ".");
 		}
+	}
+
+	/** Town members of the two fighting clans and their alliances who could
+	 *  come to watch (fighters excluded), shuffled. */
+	private List<FakePlayerAppearance> kinFanBook(FieldFight fight, Set<String> taken)
+	{
+		final List<FakePlayerAppearance> book = new ArrayList<>();
+		final ClanProfile a = _profiles.get(fight.clanAId);
+		final ClanProfile b = _profiles.get(fight.clanBId);
+		for (ClanProfile profile : _profiles.values())
+		{
+			if ((profile != a) && (profile != b) && !(((a != null) && profile.isAlliedWith(a)) || ((b != null) && profile.isAlliedWith(b))))
+			{
+				continue;
+			}
+			try
+			{
+				for (Npc member : clanMembers(profile))
+				{
+					final FakePlayerAppearance appearance = member.getFakePlayerAppearance();
+					if ((appearance != null) && (appearance.getName() != null) && !taken.contains(appearance.getName()))
+					{
+						book.add(appearance);
+					}
+				}
+			}
+			catch (Exception e)
+			{
+				// a clan we can't read just sends nobody
+			}
+		}
+		Collections.shuffle(book);
+		return book;
 	}
 
 	/** A voice from the ring: an ooh, a cheer, a jab - LOCALLY. */
@@ -6424,11 +6478,12 @@ final class DramaEngine
 		{
 			return;
 		}
-		final VoiceChoice choice = chooseVoice(profileA);
-		if (choice == null)
+		final Creature opener = duelVoice(fight, fight.clanAId);
+		if (opener == null)
 		{
 			return;
 		}
+		final VoiceChoice choice = new VoiceChoice(opener, 0, "", false);
 		String cause = _pairCauses.get(arcKey(fight.clanAId, fight.clanBId));
 		if (cause == null)
 		{
@@ -6457,11 +6512,12 @@ final class DramaEngine
 		{
 			return;
 		}
-		final VoiceChoice choice = chooseVoice(speakerClan);
-		if (choice == null)
+		final Creature caller = duelVoice(fight, speakerClan.getId());
+		if (caller == null)
 		{
 			return;
 		}
+		final VoiceChoice choice = new VoiceChoice(caller, 0, "", false);
 		if (opening)
 		{
 			String cause = _pairCauses.get(arcKey(fight.clanAId, fight.clanBId));
@@ -6482,6 +6538,127 @@ final class DramaEngine
 		}
 	}
 
+	/**
+	 * Who may talk about a duel in WORLD chat: someone who could KNOW about
+	 * it - physically there, or tied to the clans fighting. Nobody across the
+	 * world hears of a duel by magic. In order:
+	 * 1) a fighter of the named clan (standing, then fallen - the dead can
+	 *    still type);
+	 * 2) a spectator of that clan or its alliance;
+	 * 3) any spectator - only for neutral lines (clanId 0), since a
+	 *    stranger can't say "we won";
+	 * 4) a member of the clan somewhere else in the world (word travels
+	 *    inside a clan);
+	 * 5) for neutral lines, an alliance-mate elsewhere (alliance chat).
+	 * A clan with no tie to the fight never speaks of it.
+	 * clanId 0 = either side, the aggressor first. Null when nobody
+	 * qualifies: the line simply isn't said.
+	 */
+	private Creature duelVoice(List<Player> sideA, List<Player> sideB, List<Player> fans, Map<Integer, Integer> fanClans, int clanAId, int clanBId, int clanId)
+	{
+		final List<int[]> order = new ArrayList<>();
+		if ((clanId == 0) || (clanId == clanAId))
+		{
+			order.add(new int[] { 0 });
+		}
+		if ((clanId == 0) || (clanId == clanBId))
+		{
+			order.add(new int[] { 1 });
+		}
+		// 1) Fighters, standing first.
+		for (int pass = 0; pass < 2; pass++)
+		{
+			for (int[] side : order)
+			{
+				final List<Player> squad = new ArrayList<>((side[0] == 0) ? sideA : sideB);
+				Collections.shuffle(squad);
+				for (Player fighter : squad)
+				{
+					if ((fighter != null) && fighter.isOnline() && ((pass == 1) || !fighter.isAlikeDead()))
+					{
+						return fighter;
+					}
+				}
+			}
+		}
+		// 2) A spectator of the clan, or of its alliance.
+		final List<Player> ring = new ArrayList<>(fans);
+		Collections.shuffle(ring);
+		for (int[] side : order)
+		{
+			final ClanProfile own = _profiles.get((side[0] == 0) ? clanAId : clanBId);
+			if (own == null)
+			{
+				continue;
+			}
+			for (Player fan : ring)
+			{
+				if ((fan == null) || !fan.isOnline())
+				{
+					continue;
+				}
+				final Integer known = (fanClans != null) ? fanClans.get(Integer.valueOf(fan.getObjectId())) : null;
+				final int fanClanId = (known != null) ? known.intValue() : fan.getClanId();
+				final ClanProfile fanClan = _profiles.get(Integer.valueOf(fanClanId));
+				if ((fanClanId == own.getId()) || ((fanClan != null) && fanClan.isAlliedWith(own)))
+				{
+					return fan;
+				}
+			}
+		}
+		// 3) Any spectator, for a line that takes no side.
+		if (clanId == 0)
+		{
+			for (Player fan : ring)
+			{
+				if ((fan != null) && fan.isOnline() && !fan.isAlikeDead())
+				{
+					return fan;
+				}
+			}
+		}
+		// 4) A clanmate elsewhere: they heard it from their own.
+		for (int[] side : order)
+		{
+			final ClanProfile own = _profiles.get((side[0] == 0) ? clanAId : clanBId);
+			final VoiceChoice member = (own != null) ? chooseVoice(own) : null;
+			if (member != null)
+			{
+				return member.creature;
+			}
+		}
+		// 5) For a line that takes no side: an alliance-mate elsewhere (they
+		//    read alliance chat). Anyone else never heard of it.
+		if (clanId == 0)
+		{
+			final ClanProfile a = _profiles.get(clanAId);
+			final ClanProfile b = _profiles.get(clanBId);
+			final List<ClanProfile> kin = new ArrayList<>();
+			for (ClanProfile profile : _profiles.values())
+			{
+				if ((profile != a) && (profile != b) && (((a != null) && profile.isAlliedWith(a)) || ((b != null) && profile.isAlliedWith(b))))
+				{
+					kin.add(profile);
+				}
+			}
+			Collections.shuffle(kin);
+			for (ClanProfile profile : kin)
+			{
+				final VoiceChoice mate = chooseVoice(profile);
+				if (mate != null)
+				{
+					return mate.creature;
+				}
+			}
+		}
+		return null;
+	}
+
+	private Creature duelVoice(FieldFight fight, int clanId)
+	{
+		return duelVoice(fight.sideA, fight.sideB, fight.spectators, fight.fanClans, fight.clanAId, fight.clanBId, clanId);
+	}
+
 	/** A spectator's one line over the clash; Peaceful clans berate both. */
 	private void fieldCrowdLine(ClanProfile crowd, FieldFight fight)
 	{
@@ -6489,11 +6666,21 @@ final class DramaEngine
 		{
 			return;
 		}
-		final VoiceChoice choice = chooseVoice(crowd);
-		if (choice == null)
+		// Outsiders never shout about someone else's duel: the reaction comes
+		// from a fan standing in the ring, in LOCAL chat.
+		final List<Player> ring = new ArrayList<>();
+		for (Player fan : fight.spectators)
+		{
+			if ((fan != null) && fan.isOnline() && !fan.isAlikeDead())
+			{
+				ring.add(fan);
+			}
+		}
+		if (ring.isEmpty())
 		{
 			return;
 		}
+		final Player watcher = ring.get(Rnd.get(ring.size()));
 		final ClanProfile a = _profiles.get(fight.clanAId);
 		final ClanProfile b = _profiles.get(fight.clanBId);
 		if ((a == null) || (b == null))
@@ -6504,13 +6691,13 @@ final class DramaEngine
 		String prompt;
 		if (crowd.getPersona() == PersonaType.PEACEFUL)
 		{
-			prompt = "Right now, " + sideTag(fight.clanAId, fight.namesA) + " and " + sideTag(fight.clanBId, fight.namesB) + " are squaring up for real " + place + ". You are of the PEACEFUL clan " + clanNameOf(crowd) + ". Berate BOTH sides in ONE short line: no threats, no favorites, pure scorn at senseless violence - the way a tired elder player would.";
+			prompt = "Right now, " + sideTag(fight.clanAId, fight.namesA) + " and " + sideTag(fight.clanBId, fight.namesB) + " are squaring up for real " + place + ", and you are standing in the crowd watching. Berate BOTH sides in ONE short line: no threats, no favorites, pure scorn at senseless violence - the way a tired elder player would.";
 		}
 		else
 		{
-			prompt = "Right now, " + sideTag(fight.clanAId, fight.namesA) + " and " + sideTag(fight.clanBId, fight.namesB) + " are squaring up for real " + place + ". You are a member of " + clanNameOf(crowd) + ", watching as an outsider. React in ONE short line as a spectator - a gasp, a gamble, a jab, whatever your temperament wants.";
+			prompt = "Right now, " + sideTag(fight.clanAId, fight.namesA) + " and " + sideTag(fight.clanBId, fight.namesB) + " are squaring up for real " + place + ", and you are standing in the crowd watching as an outsider. React in ONE short line as a spectator - a gasp, a gamble, a jab.";
 		}
-		brainWorld(choice.creature, prompt, "delivered [CROWD]", t -> _memory.add(crowd.getId(), a.getId(), t));
+		brainNear(watcher, prompt, "delivered [CROWD]");
 	}
 
 	/** Close a duel: unlock, stand down, and let the world hear the end. */
@@ -6578,7 +6765,11 @@ final class DramaEngine
 			final String winnerNames = String.join(", ", winnerIsA ? fight.namesA : fight.namesB);
 			final String loserNames = String.join(", ", winnerIsA ? fight.namesB : fight.namesA);
 			final boolean blood = bloodHit;
-			final VoiceChoice winnerVoice = chooseVoice(winnerProfile);
+			// The world hears it from the people who FOUGHT: a winning fighter
+			// (or a winning-side fan of the clan or its alliance) - never a
+			// clanmate who was somewhere else.
+			final Creature winnerMouth = duelVoice(fight, winnerProfile.getId());
+			final VoiceChoice winnerVoice = (winnerMouth != null) ? new VoiceChoice(winnerMouth, 0, "", false) : null;
 			if (winnerVoice != null)
 			{
 				final String loserClan = clanNameOf(loserProfile);
@@ -6627,7 +6818,8 @@ final class DramaEngine
 					}
 				});
 			}
-			final VoiceChoice loserVoice = chooseVoice(loserProfile);
+			final Creature loserMouth = duelVoice(fight, loserProfile.getId());
+			final VoiceChoice loserVoice = (loserMouth != null) ? new VoiceChoice(loserMouth, 0, "", false) : null;
 			if (loserVoice != null)
 			{
 				ThreadPool.schedule(() -> brainWorld(loserVoice.creature, "Your clan " + clanNameOf(loserProfile) + " just LOST a field duel outside the gates of " + fight.townName + " against " + clanNameOf(winnerProfile) + ((blood) ? " - your clansmen " + loserNames + " died there" : " - your clansmen " + loserNames + " had to back off") + ". ONE short line, by your temperament: a bitter howl, a coughed vow of revenge, or a grudging nod.", "delivered [FIELD-LOSS]", t ->
@@ -6651,20 +6843,22 @@ final class DramaEngine
 					final String kinNames = String.join(", ", idleKin);
 					ThreadPool.schedule(() ->
 					{
-						final VoiceChoice blamer = chooseVoice(loserProfile);
+						final Creature blamer = duelVoice(fight, loserProfile.getId());
 						if (blamer == null)
 						{
 							return;
 						}
-						brainSpeak(blamer.creature, "Your clan just LOST a field clash against " + clanNameOf(winnerProfile) + ". Your OWN alliance - " + kinNames + " - never joined in and left you alone out there. ONE short hot line naming them and calling your alliance out for it.", "delivered [FIELD-BLAME]", !fight.loud, t -> _memory.add(loserProfile.getId(), loserProfile.getId(), t));
+						brainSpeak(blamer, "Your clan just LOST a field clash against " + clanNameOf(winnerProfile) + ". Your OWN alliance - " + kinNames + " - never joined in and left you alone out there. ONE short hot line naming them and calling your alliance out for it.", "delivered [FIELD-BLAME]", !fight.loud, t -> _memory.add(loserProfile.getId(), loserProfile.getId(), t));
 					}, 6000 + Rnd.get(12000) + spacingHold());
 				}
 			}
 		}
-		else
+		else if (!fight.zelda) // an interrupted duel: the hunt does the talking
 		{
-			// No winner: both bruised or both vanished. One short note.
-			final VoiceChoice voice = chooseVoice(aProfile);
+			// No winner: both bruised or both vanished. One short note, from
+			// someone who was out there.
+			final Creature drawMouth = duelVoice(fight, 0);
+			final VoiceChoice voice = (drawMouth != null) ? new VoiceChoice(drawMouth, 0, "", false) : null;
 			if (voice != null)
 			{
 				brainWorld(voice.creature, "The field duel outside the gates of " + fight.townName + " between " + clanNameOf(aProfile) + "'s " + String.join(", ", fight.namesA) + " and " + clanNameOf(bProfile) + "'s " + String.join(", ", fight.namesB) + ((note != null) ? " just scattered (" + note + ")" : "just ended even - both sides hurt, none dead") + ". ONE short line, ending it in words: either clan's tone is fine.", "delivered [FIELD-DRAW]", t ->
@@ -6684,6 +6878,444 @@ final class DramaEngine
 		{
 			_pairCauses.put(key, "a field clash between the two clans");
 		}
+	}
+
+	// ── The ZeldaChickens rule ───────────────────────────────────────────
+	// Hit a chicken in Zelda and the whole flock comes for you. Here: a REAL
+	// player who strikes or debuffs an arena duelist or fan breaks the duel,
+	// and every fighter and fan present turns on them, while waves of hunters
+	// keep coming until the offender dies, leaves the world, or reaches a
+	// town (a peace zone, where nobody can fight). All of them berate the
+	// player in chat - brain-written, like every other word.
+
+	private boolean _zeldaChickens = true;
+	private int _zeldaMaxHunters = 6;
+	private long _zeldaWaveMillis = 20000L;
+	private int _zeldaWaveSize = 2;
+	private long _zeldaMaxMillis = 900000L;
+	private final Map<Integer, ChickenHunt> _hunts = new ConcurrentHashMap<>();
+	private final Set<Integer> _huntPack = ConcurrentHashMap.newKeySet();
+
+	private static final class ChickenHunt
+	{
+		final Player offender;
+		final FieldFight ctx; // the broken duel, reused as the pack's play memory
+		final List<Player> pack = new java.util.concurrent.CopyOnWriteArrayList<>();
+		/** The duel's own cast, kept apart: only they may shout to the world. */
+		final List<Player> fightersA = new ArrayList<>();
+		final List<Player> fightersB = new ArrayList<>();
+		final List<Player> fans = new ArrayList<>();
+		final long startedAt = System.currentTimeMillis();
+		long lastWave = System.currentTimeMillis();
+		long lastBerate = 0;
+		int berates;
+		int spawned;
+		volatile boolean over;
+
+		ChickenHunt(Player offender, FieldFight ctx)
+		{
+			this.offender = offender;
+			this.ctx = ctx;
+		}
+	}
+
+	void setZeldaChickens(boolean enabled, int maxHunters, int waveSeconds, int waveSize, int maxMinutes)
+	{
+		_zeldaChickens = enabled;
+		_zeldaMaxHunters = Math.max(1, Math.min(20, maxHunters));
+		_zeldaWaveMillis = Math.max(5, Math.min(300, waveSeconds)) * 1000L;
+		_zeldaWaveSize = Math.max(1, Math.min(6, waveSize));
+		_zeldaMaxMillis = Math.max(1, Math.min(120, maxMinutes)) * 60000L;
+	}
+
+	/** The real player behind an attacker: itself, or a summon's owner. */
+	private static Player humanBehind(Creature attacker)
+	{
+		if (attacker instanceof Player)
+		{
+			return (Player) attacker;
+		}
+		if (attacker instanceof Summon)
+		{
+			return ((Summon) attacker).getOwner();
+		}
+		return null;
+	}
+
+	/**
+	 * Called from the pack's damage hook and skill-use event, on whatever
+	 * thread the blow lands on: only cheap checks here, the hunt itself
+	 * starts on the game pool.
+	 */
+	void observeHostility(Creature attacker, Creature target)
+	{
+		if (!_zeldaChickens || _fieldFights.isEmpty() || !(target instanceof Player))
+		{
+			return;
+		}
+		final Player offender = humanBehind(attacker);
+		if ((offender == null) || (offender == target) || _hunts.containsKey(Integer.valueOf(offender.getObjectId())) || _huntPack.contains(Integer.valueOf(offender.getObjectId())))
+		{
+			return;
+		}
+		final Player victim = (Player) target;
+		for (FieldFight fight : _fieldFights.values())
+		{
+			if (fight.running && !fight.zelda && (fight.sideA.contains(victim) || fight.sideB.contains(victim) || fight.spectators.contains(victim) || fight.heralds.contains(victim)))
+			{
+				if (!isHumanWatcher(null, offender))
+				{
+					return; // a bot's stray blow is not an insult
+				}
+				fight.zelda = true; // claim it once, even if two blows land together
+				ThreadPool.schedule(() -> startChickenHunt(offender, victim, fight), 0);
+				return;
+			}
+		}
+	}
+
+	private void startChickenHunt(Player offender, Player victim, FieldFight fight)
+	{
+		final ChickenHunt hunt = new ChickenHunt(offender, fight);
+		final List<Player> cast = new ArrayList<>();
+		cast.addAll(fight.sideA);
+		cast.addAll(fight.sideB);
+		cast.addAll(fight.spectators);
+		cast.addAll(fight.heralds);
+		final PhantomManager pm = PhantomManager.getInstance();
+		for (Player member : cast)
+		{
+			if ((member != null) && member.isOnline())
+			{
+				hunt.pack.add(member);
+				_huntPack.add(Integer.valueOf(member.getObjectId()));
+			}
+		}
+		hunt.fightersA.addAll(fight.sideA);
+		hunt.fightersB.addAll(fight.sideB);
+		hunt.fans.addAll(fight.spectators);
+		// Hand the cast over BEFORE the duel closes, so its cleanup does not
+		// release them: the hunt owns them now and releases them itself.
+		fight.sideA.clear();
+		fight.sideB.clear();
+		fight.spectators.clear();
+		fight.heralds.clear();
+		endFight(fight, null, "interrupted by " + offender.getName());
+		// The pack is one squad now: its healers heal any of them.
+		fight.sideA.addAll(hunt.pack);
+		_hunts.put(Integer.valueOf(offender.getObjectId()), hunt);
+		for (Player member : hunt.pack)
+		{
+			try
+			{
+				if (!member.isAlikeDead())
+				{
+					pm.setLivingIdle(member, false);
+					member.setTarget(offender);
+				}
+			}
+			catch (Exception e)
+			{
+				// one stubborn member must not stop the flock
+			}
+		}
+		if (_infoHook != null)
+		{
+			_infoHook.accept("clan-personalities: [INTERFERE] " + offender.getName() + " hit " + victim.getName() + " in the duel outside " + fight.townName + " - all " + hunt.pack.size() + " present turn on them; hunters follow every " + (_zeldaWaveMillis / 1000) + "s until they die, leave or reach a town.");
+		}
+		// The first fury: the one who was hit, then a fan, and the world hears.
+		final String town = townKey(fight.townName);
+		final String insult = "A real player named " + offender.getName() + " just attacked " + victim.getName() + " in the MIDDLE of an honorable clan duel outside " + fight.townName + " - the duel is ruined. ";
+		if (victim.isOnline() && !victim.isAlikeDead())
+		{
+			brainNear(victim, insult + "You are the one they hit. ONE short furious line straight at " + offender.getName() + " - everyone here is coming for them now.", "delivered [INTERFERE-BERATE]");
+		}
+		ThreadPool.schedule(() ->
+		{
+			final Player fan = pickHuntVoice(hunt, victim);
+			if (fan != null)
+			{
+				brainNear(fan, insult + "You were watching. ONE short line berating " + offender.getName() + " for butting into a duel that wasn't theirs.", "delivered [INTERFERE-BERATE]");
+			}
+		}, 3000 + Rnd.get(2000));
+		ThreadPool.schedule(() ->
+		{
+			final Creature crier = duelVoice(hunt.fightersA, hunt.fightersB, hunt.fans, hunt.ctx.fanClans, hunt.ctx.clanAId, hunt.ctx.clanBId, 0);
+			if (crier != null)
+			{
+				brainSpeak(crier, insult + "ONE short world-chat line telling everyone that " + offender.getName() + " ruined the duel at " + town + " and that the whole crowd is hunting them now.", "delivered [INTERFERE-WORLD]", true, null, town);
+			}
+		}, 6000 + Rnd.get(3000));
+		hunt.lastBerate = System.currentTimeMillis();
+		scheduleHuntTick(hunt, 500);
+	}
+
+	/** A living, online pack member to speak, other than `not` (may be null). */
+	private static Player pickHuntVoice(ChickenHunt hunt, Player not)
+	{
+		final List<Player> voices = new ArrayList<>();
+		for (Player member : hunt.pack)
+		{
+			if ((member != not) && member.isOnline() && !member.isAlikeDead())
+			{
+				voices.add(member);
+			}
+		}
+		return voices.isEmpty() ? null : voices.get(Rnd.get(voices.size()));
+	}
+
+	private void scheduleHuntTick(ChickenHunt hunt, long delay)
+	{
+		ThreadPool.schedule(() ->
+		{
+			if (hunt.over)
+			{
+				return;
+			}
+			try
+			{
+				huntTick(hunt);
+			}
+			catch (Exception e)
+			{
+				if (_infoHook != null)
+				{
+					_infoHook.accept("clan-personalities: [INTERFERE] a hunt beat failed (" + e + ").");
+				}
+			}
+			if (!hunt.over)
+			{
+				scheduleHuntTick(hunt, 1000);
+			}
+		}, delay);
+	}
+
+	private void huntTick(ChickenHunt hunt)
+	{
+		final Player offender = hunt.offender;
+		final long now = System.currentTimeMillis();
+		if ((offender == null) || !offender.isOnline())
+		{
+			endChickenHunt(hunt, "left the world");
+			return;
+		}
+		if (offender.isAlikeDead())
+		{
+			endChickenHunt(hunt, "dead");
+			return;
+		}
+		if (offender.isInsideZone(ZoneId.PEACE))
+		{
+			endChickenHunt(hunt, "reached a town");
+			return;
+		}
+		if ((now - hunt.startedAt) >= _zeldaMaxMillis)
+		{
+			endChickenHunt(hunt, "outlasted the hunt");
+			return;
+		}
+		// Everyone still standing goes for the offender, in their own role.
+		int alive = 0;
+		for (Player member : hunt.pack)
+		{
+			if (!member.isOnline() || member.isAlikeDead())
+			{
+				// A fallen hunter leaves the pack; its body goes after a while,
+				// so a long chase never piles up corpses.
+				hunt.pack.remove(member);
+				hunt.ctx.sideA.remove(member);
+				ThreadPool.schedule(() ->
+				{
+					_huntPack.remove(Integer.valueOf(member.getObjectId()));
+					releaseFighter(member);
+				}, 20000 + Rnd.get(10000));
+				continue;
+			}
+			alive++;
+			try
+			{
+				pairDrive(hunt.ctx, member, offender);
+			}
+			catch (Exception e)
+			{
+				// keep the rest of the flock moving
+			}
+		}
+		// Waves: more come, up to the live cap.
+		if (((now - hunt.lastWave) >= _zeldaWaveMillis) && (alive < _zeldaMaxHunters))
+		{
+			hunt.lastWave = now;
+			spawnHunters(hunt, Math.min(_zeldaWaveSize, _zeldaMaxHunters - alive));
+		}
+		// The berating never quite stops: a line every ~25 s, a few in all.
+		if ((hunt.berates < 6) && ((now - hunt.lastBerate) >= (22000L + Rnd.get(8000))))
+		{
+			hunt.lastBerate = now;
+			hunt.berates++;
+			final Player voice = pickHuntVoice(hunt, null);
+			if (voice != null)
+			{
+				brainNear(voice, "You are chasing " + offender.getName() + ", the player who broke into an honorable clan duel outside " + hunt.ctx.townName + ". ONE short line yelled at them mid-chase: berate them, mock them, tell them there is no escape.", "delivered [INTERFERE-BERATE]");
+			}
+		}
+	}
+
+	/** New hunters appear a short sprint from the offender, on dry ground. */
+	private void spawnHunters(ChickenHunt hunt, int count)
+	{
+		if (count <= 0)
+		{
+			return;
+		}
+		final Player offender = hunt.offender;
+		final PhantomManager pm = PhantomManager.getInstance();
+		final Collection<WaterZone> waters = ZoneManager.getInstance().getAllZones(WaterZone.class);
+		final Set<String> taken = new LinkedHashSet<>();
+		for (Player member : hunt.pack)
+		{
+			taken.add(member.getName());
+		}
+		final List<FakePlayerAppearance> book = identityBook(80);
+		// Hunters near the offender's level first: a fair, scary chase.
+		final int level = offender.getLevel();
+		book.sort((a, b) -> Integer.compare(Math.abs(a.getLevel() - level), Math.abs(b.getLevel() - level)));
+		int made = 0;
+		for (FakePlayerAppearance appearance : book)
+		{
+			if (made >= count)
+			{
+				break;
+			}
+			if (taken.contains(appearance.getName()) || nameTaken(appearance))
+			{
+				continue;
+			}
+			try
+			{
+				final int degrees = Rnd.get(360);
+				final int radius = 500 + Rnd.get(301);
+				final int hx = offender.getX() + (int) Math.round(radius * Math.cos(Math.toRadians(degrees)));
+				final int hy = offender.getY() + (int) Math.round(radius * Math.sin(Math.toRadians(degrees)));
+				final int hz = GeoEngine.getInstance().getSpawnHeight(hx, hy, offender.getZ());
+				if (waterAt(waters, hx, hy, hz))
+				{
+					continue;
+				}
+				final Player hunter = pm.spawnPartyMemberAs(appearance, new Location(hx, hy, hz), appearance.getLevel());
+				if (hunter == null)
+				{
+					continue;
+				}
+				if (hunter.isInsideZone(ZoneId.PEACE))
+				{
+					releaseFighter(hunter); // no hunting inside a town
+					continue;
+				}
+				pm.setLivingIdle(hunter, false);
+				fitWeapon(hunter);
+				hunter.setTarget(offender);
+				hunt.pack.add(hunter);
+				hunt.ctx.sideA.add(hunter);
+				_huntPack.add(Integer.valueOf(hunter.getObjectId()));
+				taken.add(hunter.getName());
+				made++;
+				hunt.spawned++;
+			}
+			catch (Exception e)
+			{
+				if (_infoHook != null)
+				{
+					_infoHook.accept("clan-personalities: [INTERFERE] a hunter failed to appear: " + e);
+				}
+			}
+		}
+		if ((made > 0) && (_infoHook != null))
+		{
+			_infoHook.accept("clan-personalities: [INTERFERE-WAVE] " + made + " more hunter(s) close in on " + offender.getName() + " (" + hunt.spawned + " so far).");
+		}
+	}
+
+	private void endChickenHunt(ChickenHunt hunt, String how)
+	{
+		if (hunt.over)
+		{
+			return;
+		}
+		hunt.over = true;
+		_hunts.remove(Integer.valueOf(hunt.offender.getObjectId()));
+		final Player offender = hunt.offender;
+		if (_infoHook != null)
+		{
+			_infoHook.accept("clan-personalities: [INTERFERE-END] " + offender.getName() + " " + how + " after " + ((System.currentTimeMillis() - hunt.startedAt) / 1000) + "s; " + hunt.spawned + " hunter(s) joined the chase.");
+		}
+		// World chat: only one of the duel's own cast (fighters, or a fan of
+		// their clans or alliances) - the hunters joined later, from outside.
+		final Creature voice = duelVoice(hunt.fightersA, hunt.fightersB, hunt.fans, hunt.ctx.fanClans, hunt.ctx.clanAId, hunt.ctx.clanBId, 0);
+		if (voice != null)
+		{
+			final String moment;
+			if ("dead".equals(how))
+			{
+				moment = offender.getName() + " is DOWN - the player who ruined the duel outside " + hunt.ctx.townName + " got what was coming. ONE short world-chat line gloating that justice was done.";
+			}
+			else if ("reached a town".equals(how))
+			{
+				moment = offender.getName() + ", the player who ruined the duel outside " + hunt.ctx.townName + ", ran and hid inside a town where nobody can touch them. ONE short world-chat line calling them a coward who ran.";
+			}
+			else if ("left the world".equals(how))
+			{
+				moment = offender.getName() + ", the player who ruined the duel outside " + hunt.ctx.townName + ", logged off to escape. ONE short world-chat line mocking them for running away.";
+			}
+			else
+			{
+				moment = "The hunt for " + offender.getName() + ", who ruined the duel outside " + hunt.ctx.townName + ", is called off for now. ONE short world-chat line: this isn't forgotten.";
+			}
+			brainSpeak(voice, moment, "delivered [INTERFERE-WORLD]", true, null);
+		}
+		// Stand down: stop the chase, linger like a duel's aftermath, then go.
+		final PhantomManager pm = PhantomManager.getInstance();
+		final List<Player> pack = new ArrayList<>(hunt.pack);
+		for (Player member : pack)
+		{
+			try
+			{
+				if (member.isOnline() && !member.isAlikeDead())
+				{
+					member.abortAttack();
+					member.abortCast();
+					member.setTarget(null);
+					pm.setLivingIdle(member, true);
+				}
+			}
+			catch (Exception e)
+			{
+				// best effort
+			}
+		}
+		scheduleAftermathGuard(pack, System.currentTimeMillis() + 25000L);
+		for (Player member : pack)
+		{
+			ThreadPool.schedule(() ->
+			{
+				_huntPack.remove(Integer.valueOf(member.getObjectId()));
+				releaseFighter(member);
+			}, 25000 + Rnd.get(10000));
+		}
+	}
+
+	/** Module disable: every live hunt stands down and its cast is released. */
+	void endAllHunts()
+	{
+		for (ChickenHunt hunt : new ArrayList<>(_hunts.values()))
+		{
+			hunt.over = true;
+			for (Player member : hunt.pack)
+			{
+				releaseFighter(member);
+			}
+		}
+		_hunts.clear();
+		_huntPack.clear();
 	}
 
 	/** The loser's alliance-mates (the fight sides EXCLUDED), by name. */

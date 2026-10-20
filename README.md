@@ -2,7 +2,7 @@
 
 **Clans in your Lineage 2 world that actually *talk* — and settle it with steel. They argue, hold grudges, help each other, remember everything, and when a feud boils over, they fight it out in front of you.**
 
-**Latest: [v0.2.0 — Phase 2: field duels](https://github.com/Wyrbun/clan-personalities/releases/tag/v0.2.0)** (public testing).
+**Latest: [v0.2.1](https://github.com/Wyrbun/clan-personalities/releases/tag/v0.2.1)** — Phase 2 field duels, public testing.
 
 This module gives living clans five personalities (Peaceful, Neutral, Altruistic, Aggressive, Player-Killing). Their bots speak in world chat through the pack's FPC brain: they pick quarrels over concrete incidents, taunt and threaten, fire back at whoever calls them out, drag their allies in, soften into kindness when the stage is calm, and retell old wars days later — each side remembering it their own way.
 
@@ -180,6 +180,12 @@ Quarrels, threats and taunts heat a pair of clans until one boils over into a **
 - Fighters are temporary copies of the clans' town bots and are discarded afterwards — never saved as characters. Phantoms hunting in the field are never involved.
 
 Useful log marks in `java0.log` (with `Debug = True`): `[FIELD-WHERE]` (arena announced), `[FIELD-MATCH]`, `[GEAR]`, `[SPECTATORS]`, `[FIELD-FUSE]`/`[FIELD-STRIKE]`, `[FIELD-WIN]`/`[FIELD-DRAW]`, `[FIELD-GLOAT]`, `[RECORD]`, `[REVENGE]`.
+
+## What's new in 0.2.1
+
+- **Interference failsafe.** A duel is between the two clans. If an outsider attacks its fighters or spectators, the duel is called off and everyone present defends themselves.
+- **Only people who could know talk about a duel.** World-chat lines about a fight come from those at the arena (the fighters first) or from the fighting clans and their alliances. Win and loss announcements come from the fighters themselves; clans with no tie to the fight no longer comment on it in world chat.
+- **The crowd sometimes includes the clans' own people**: a seat or two for a member of the fighting clans or their alliances; the rest are passers-by, as before.
 
 ## What's new in 0.2.0
 

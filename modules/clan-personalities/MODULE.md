@@ -3,7 +3,7 @@
 Maintainer reference for the module. Written against the Living World Module
 Framework (`docs/MODULE_FRAMEWORK.md`, `docs/MODULE_AUTHORING_GUIDE.md`).
 
-**Current version: 0.2.0.** This file has two halves:
+**Current version: 0.2.1.** This file has two halves:
 
 1. **The reference** (everything up to "Changelog") describes the module *as it
    is now*. If it disagrees with an older note anywhere, the reference wins.
@@ -171,6 +171,16 @@ Field phantoms and NPCs that are out hunting are never touched.
    the history up. A clan that lost wants revenge, and its brew heats faster
    (`RevengeBoost`, `REVENGE`). Fights that never began are not recorded.
 
+9. **Interference** (`DuelInterference`, on by default). A duel is between
+   the two clans. If an outsider (a real player or their summon) damages or
+   debuffs a fighter or spectator, the duel is called off and everyone
+   present defends themselves against the intruder, with reinforcements
+   (`InterferenceWaveSeconds`, `InterferenceWaveSize`, at most
+   `InterferenceMaxPursuers` at once) until the intruder falls, leaves or
+   reaches a town, and `InterferenceMaxMinutes` at most. Heals and buffs
+   don't count; bots never trigger it. Every defender is temporary and
+   discarded afterwards (`INTERFERE`).
+
 Heralds (road-side announcers) are retired. `FieldHeralds = 0` is the default,
 and the code path remains only as a dial.
 
@@ -323,6 +333,7 @@ clan-personalities/
 | Before the blows | `FIELD-FUSE` `FIELD-STRIKE` `CROWD-TALK` `FIGHTER-REPLY` `FIELD-TRASH` |
 | The fight and after | `FIELD-FIGHT` `FIELD-BLOWS` `FIELD-KILL` `FIELD-WIN` `FIELD-LOSS` `FIELD-DRAW` `FIELD-GLOAT` `FIELD-BLAME` `CROWD` `FIELD-EXIT` |
 | Records | `RECORD` `REVENGE` |
+| Interference | `INTERFERE` `INTERFERE-BERATE` `INTERFERE-WORLD` `INTERFERE-WAVE` `INTERFERE-END` |
 | Brain | `BRAIN-GATE`, `brain miss ... line skipped` |
 
 ## Lifecycle and both off states
@@ -358,6 +369,21 @@ reported to the pack author.
 
 History, newest first. Where an entry contradicts the reference above, the
 reference describes the current behavior.
+
+### 0.2.1 (2026-10-20): duel failsafes and consistent witnesses
+
+- **Interference failsafe.** Outsiders who attack a duel's fighters or
+  spectators no longer break it silently: the duel is called off and those
+  present defend themselves (see Phase 2, step 9).
+- **Only people who could know talk about a duel in world chat:** those at
+  the arena (fighters first, then spectators of the fighting clans or their
+  alliances, then other spectators for neutral lines), or members of the
+  fighting clans and, for neutral lines, their alliances. Win and loss
+  announcements come from the fighters. Outsider clans no longer comment on
+  a duel in world chat; crowd reactions are local.
+- **The crowd sometimes includes the clans' own people:** one seat (rarely
+  two) for a member of the fighting clans or their alliances; the rest are
+  passers-by, as before.
 
 ### 0.2.0 (2026-10-19): Phase 2 ready for public testing
 

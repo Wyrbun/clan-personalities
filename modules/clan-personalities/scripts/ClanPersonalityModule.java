@@ -29,6 +29,9 @@ import java.util.logging.Logger;
 
 import org.l2jmobius.commons.threads.ThreadPool;
 import org.l2jmobius.gameserver.model.World;
+import org.l2jmobius.gameserver.model.events.EventType;
+import org.l2jmobius.gameserver.model.events.holders.actor.creature.OnCreatureSkillUse;
+import org.l2jmobius.gameserver.model.skill.Skill;
 import org.l2jmobius.gameserver.modules.GameModule;
 import org.l2jmobius.gameserver.modules.ModuleContext;
 import org.l2jmobius.gameserver.modules.ModulesConfig;
@@ -196,6 +199,27 @@ public final class ClanPersonalityModule implements GameModule
 		{
 			engine.setEncounters(context.config().getInt("EncounterChance", 25), context.config().getInt("EncounterScanRadius", 700), context.config().getInt("EncounterFightMaxSeconds", 90), context.config().getInt("EncounterCrowdChance", 60), context.config().getInt("LoserBlameChance", 50));
 			context.logging().info("clan-personalities: Phase 2 field encounters armed (base chance " + context.config().getInt("EncounterChance", 25) + "% per drama tick, radius " + context.config().getInt("EncounterScanRadius", 700) + "m).");
+			// The ZeldaChickens rule: a real player who hits or debuffs a duel's
+			// fighters or fans gets the whole crowd - and waves of hunters - on
+			// them until they die, leave, or reach a town. The pack reports
+			// every blow (attacker, target) and every skill use; the engine
+			// only does cheap checks on those threads.
+			final boolean zelda = context.config().getBoolean("DuelInterference", true);
+			engine.setZeldaChickens(zelda, context.config().getInt("InterferenceMaxPursuers", 6), context.config().getInt("InterferenceWaveSeconds", 20), context.config().getInt("InterferenceWaveSize", 2), context.config().getInt("InterferenceMaxMinutes", 15));
+			if (zelda)
+			{
+				final DramaEngine watched = engine;
+				context.damage().addListener((attacker, target, damage, skill, critical) -> watched.observeHostility(attacker, target));
+				context.events().onPlayers(EventType.ON_CREATURE_SKILL_USE, (OnCreatureSkillUse event) ->
+				{
+					final Skill used = event.getSkill();
+					if ((used != null) && (used.isDebuff() || used.hasNegativeEffect()) && !used.isDamage())
+					{
+						watched.observeHostility(event.getCaster(), event.getTarget());
+					}
+				});
+				_engineForHunts = engine;
+			}
 		}
 
 		// Drama arcs: arguments run a few beats and must end with a
@@ -389,6 +413,9 @@ public final class ClanPersonalityModule implements GameModule
 		return cues;
 	}
 
+	/** The engine, kept for onDisable so live hunts can stand down. */
+	private volatile DramaEngine _engineForHunts;
+
 	@Override
 	public void onDisable(ModuleContext context)
 	{
@@ -402,6 +429,12 @@ public final class ClanPersonalityModule implements GameModule
 		}
 		// The warm-keeper must not outlive the module: on a cloud brain every
 		// ping after shutdown is money spent for nobody.
+		final DramaEngine hunts = _engineForHunts;
+		if (hunts != null)
+		{
+			hunts.endAllHunts(); // no hunter outlives the module
+			_engineForHunts = null;
+		}
 		final BrainClient brain = _brainClient;
 		if (brain != null)
 		{
