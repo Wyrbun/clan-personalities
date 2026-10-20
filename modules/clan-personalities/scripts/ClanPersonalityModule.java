@@ -204,6 +204,7 @@ public final class ClanPersonalityModule implements GameModule
 			// them until they die, leave, or reach a town. The pack reports
 			// every blow (attacker, target) and every skill use; the engine
 			// only does cheap checks on those threads.
+			engine.setPeacefulEngageChance(context.config().getInt("PeacefulEngageChance", 30));
 			final boolean zelda = context.config().getBoolean("DuelInterference", true);
 			engine.setZeldaChickens(zelda, context.config().getInt("InterferenceMaxPursuers", 6), context.config().getInt("InterferenceWaveSeconds", 20), context.config().getInt("InterferenceWaveSize", 2), context.config().getInt("InterferenceMaxMinutes", 15));
 			if (zelda)
@@ -313,6 +314,7 @@ public final class ClanPersonalityModule implements GameModule
 		engine.setPlayerGrace(context.config().getInt("PlayerGraceRadius", 3000), context.config().getInt("PlayerRoadRadius", 2200), context.config().getInt("PlayerGraceMaxSeconds", 180) * 1000L);
 		engine.setSkirmishCooldowns(context.config().getInt("SkirmishCooldownSeconds", 240) * 1000L, context.config().getInt("SkirmishHeatStepSeconds", 90) * 1000L);
 		engine.setBrewRequirements(context.config().getInt("BrewBeatsForSteel", 3), context.config().getInt("BrewWindowSeconds", 900), context.config().getInt("BrewMinSeconds", 90));
+		engine.setAllianceBrewFactor(context.config().getInt("AllianceBrewFactor", 2));
 
 		// Clan voices: each clan keeps its leader/officer/member roles stable
 		// (derived from names), the talker keeps the word, senior ranks take

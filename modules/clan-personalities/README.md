@@ -82,6 +82,14 @@ Quarrels, threats and taunts heat up between two clans until one boils over into
 - Fighters are temporary copies of the clans' town bots and vanish afterwards; nothing
   is saved as a character. Hunting phantoms in the field are never involved.
 
+## What's new in 0.2.3
+
+- **Quiet when nobody is home.** With no real player online, the module pauses completely: no quarrels, no duels, no brain calls. It picks up again when someone logs in.
+- **The crowd talks only when someone can hear it**, also during the fight.
+- **Peaceful clans never throw the first blow.** The other side always swings first.
+- **Alliance brothers draw steel less often** (`AllianceBrewFactor`, default 2).
+- Brain lines with template artifacts like `[redacted]` are dropped instead of spoken.
+
 ## What's new in 0.2.1
 
 - **Interference failsafe.** A duel is between the two clans. If an outsider attacks its fighters or spectators, the duel is called off and everyone present defends themselves.

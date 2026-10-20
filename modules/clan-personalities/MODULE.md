@@ -3,7 +3,7 @@
 Maintainer reference for the module. Written against the Living World Module
 Framework (`docs/MODULE_FRAMEWORK.md`, `docs/MODULE_AUTHORING_GUIDE.md`).
 
-**Current version: 0.2.1.** This file has two halves:
+**Current version: 0.2.3.** This file has two halves:
 
 1. **The reference** (everything up to "Changelog") describes the module *as it
    is now*. If it disagrees with an older note anywhere, the reference wins.
@@ -129,7 +129,8 @@ Field phantoms and NPCs that are out hunting are never touched.
 
 1. **The brew.** Quarrels, threats and taunts heat a pair's brew. When it boils,
    the engine stages a fight. While no brew is warm, it skips the arena scan
-   entirely.
+   entirely. Alliance brothers bicker longer before they draw steel: their
+   brew needs `AllianceBrewFactor` (2) times the usual `BrewBeatsForSteel`.
 2. **The arena.** A piste is sited just outside a town gate, on open, dry and
    walkable ground. It keeps clear of gate guards (`GuardClearRadius`, 350) and
    aggressive monsters (`MonsterClearRadius`, 700). Every town is a candidate:
@@ -154,12 +155,19 @@ Field phantoms and NPCs that are out hunting are never touched.
    - If you are very close (`VeryCloseRadius` 600), the jabs and the fence wait
      speed up.
    - Nobody waits longer than `FenceMaxWaitSeconds`.
+   - **A Peaceful clan never throws the first blow**: against any other clan,
+     the other side swings first. Two Peaceful clans facing each other roll
+     `PeacefulEngageChance` (30%): one of them loses its patience, or neither
+     swings and the duel is dropped (`FIELD-PEACE`). Peaceful clans never
+     start a duel in the first place.
 6. **The fight.** Each fighter plays its class role. It casts skills first, and
    casters do not melee. Healers and buffers support first: they heal the most
    wounded squadmate (under 70% HP) and lay up to 4 buffs, and only swing a
    weapon when out of mana or alone on their side (`SUPPORT`). A 1v1 never fields a
    lone healer or buffer (the Orc Mystic line excepted: it has attack spells). Skills that are useless in PvP are never used
    (`FieldSkillBlacklist`: Spoil, Sweeper, Sow, Fake Death, and so on).
+   - Once blows fly, the crowd (gossip, fighter replies, cheers) still talks
+     only while a real human is within earshot of the arena (2000).
    - The fight ends at a death or at `EncounterFightMaxSeconds`. At the time
      limit, the side that bled less holds the field; otherwise it's a draw.
 7. **After.** The winner gloats (`FIELD-GLOAT`). The crowd and the loser react,
@@ -231,6 +239,15 @@ directed one-line mode:
   the brain runs.
 - A brain that dies mid-game means silence. Nothing canned is ever spoken in
   its place.
+
+**Nobody online, nothing spoken.** While no real human is connected, the
+module pauses: no new drama, no duels, and no brain calls at all (`IDLE` in
+the log). Queued lines and a fight already running stay silent; a fight still
+finishes on its own. Everything resumes when a player logs in.
+
+**Not speech, not spoken.** A brain line carrying a model artifact (template
+brackets like `[redacted]` or `{clan}`) is dropped whole, like a brain miss.
+The module never edits the brain's words; typos stay.
 
 **Warm-keeper.** One tiny ping every 3.5 minutes keeps the model loaded in
 VRAM. It:
@@ -329,12 +346,12 @@ clan-personalities/
 | Focus and reading | `FOCUS` `TAUNT` `READ` `READ-ASK` `READ-CONFIRM` `READ-DEFUSE` |
 | Typos | `TYPO-SLIP` `TYPO-FIX` |
 | Support | `SUPPORT` |
-| Duel staging | `FIELD-SCAN` `FIELD-TRY` `FIELD-STAGE` `FIELD-MATCH` `GEAR` `SKILLS` `SPECTATORS` `FIELD-WHERE` |
+| Duel staging | `FIELD-SCAN` `FIELD-TRY` `FIELD-STAGE` `FIELD-MATCH` `GEAR` `SKILLS` `SPECTATORS` `FIELD-WHERE` `FIELD-PEACE` |
 | Before the blows | `FIELD-FUSE` `FIELD-STRIKE` `CROWD-TALK` `FIGHTER-REPLY` `FIELD-TRASH` |
 | The fight and after | `FIELD-FIGHT` `FIELD-BLOWS` `FIELD-KILL` `FIELD-WIN` `FIELD-LOSS` `FIELD-DRAW` `FIELD-GLOAT` `FIELD-BLAME` `CROWD` `FIELD-EXIT` |
 | Records | `RECORD` `REVENGE` |
 | Interference | `INTERFERE` `INTERFERE-BERATE` `INTERFERE-WORLD` `INTERFERE-WAVE` `INTERFERE-END` |
-| Brain | `BRAIN-GATE`, `brain miss ... line skipped` |
+| Brain | `BRAIN-GATE`, `IDLE`, `brain miss ... line skipped` |
 
 ## Lifecycle and both off states
 
@@ -369,6 +386,27 @@ reported to the pack author.
 
 History, newest first. Where an entry contradicts the reference above, the
 reference describes the current behavior.
+
+### 0.2.3 (2026-10-20): quiet when nobody is home
+
+(0.2.2 was skipped on purpose, to match the testers' numbering.)
+
+- **Nobody online, nothing spoken.** With no real human connected, the module
+  pauses: no new quarrels, no duels, no brain calls. A 26-minute idle test
+  had produced 35 lines in 15 minutes for an empty server; a metered cloud
+  brain billed every one.
+- **The crowd talks only for someone.** Once blows flew, crowd gossip,
+  fighter replies and cheers kept running with nobody near; they now need a
+  real human within earshot of the arena.
+- **Model artifacts are dropped.** A line carrying template brackets such as
+  `[redacted]` is skipped instead of spoken.
+- **Peaceful clans never throw the first blow.** The other side always
+  swings first; two Peaceful clans roll `PeacefulEngageChance` or drop the
+  duel.
+- **Alliance brothers draw steel less often.** Their brew needs
+  `AllianceBrewFactor` (2) times the usual beats; with 12 clans in 3
+  alliances, most quarrels are between brothers.
+- Author in `module.json` is now Wyr.
 
 ### 0.2.1 (2026-10-20): duel failsafes and consistent witnesses
 

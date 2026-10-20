@@ -48,7 +48,7 @@ And when it boils over (live log, 2026-10-19 — a taunt that became a 3v3 outsi
 ## Install
 
 1. Shut down the game server.
-2. Copy the whole `modules/clan-personalities` folder into your pack's `game\modules\` folder.
+2. Unzip the release zip: it holds one `clan-personalities` folder. Copy that folder into your pack's `game\modules\` folder (you end up with `game\modules\clan-personalities\module.json`).
 3. In the launcher, make sure `StartBrain = true` (launcher\launcher.ini).
 4. Start via the launcher and **leave the launcher open while you play** — the brain is its child process; closing the launcher kills it.
 5. Within **five minutes of boot** the first guaranteed drama opens. Watch the `!` world chat.
@@ -180,6 +180,14 @@ Quarrels, threats and taunts heat a pair of clans until one boils over into a **
 - Fighters are temporary copies of the clans' town bots and are discarded afterwards — never saved as characters. Phantoms hunting in the field are never involved.
 
 Useful log marks in `java0.log` (with `Debug = True`): `[FIELD-WHERE]` (arena announced), `[FIELD-MATCH]`, `[GEAR]`, `[SPECTATORS]`, `[FIELD-FUSE]`/`[FIELD-STRIKE]`, `[FIELD-WIN]`/`[FIELD-DRAW]`, `[FIELD-GLOAT]`, `[RECORD]`, `[REVENGE]`.
+
+## What's new in 0.2.3
+
+- **Quiet when nobody is home.** With no real player online, the module pauses completely: no quarrels, no duels, no brain calls. It picks up again when someone logs in.
+- **The crowd talks only when someone can hear it**, also during the fight.
+- **Peaceful clans never throw the first blow.** The other side always swings first; two Peaceful clans may simply walk away.
+- **Alliance brothers draw steel less often** (`AllianceBrewFactor`, default 2): with 12 clans in 3 alliances, most quarrels are between brothers.
+- Brain lines with template artifacts like `[redacted]` are dropped instead of spoken.
 
 ## What's new in 0.2.1
 

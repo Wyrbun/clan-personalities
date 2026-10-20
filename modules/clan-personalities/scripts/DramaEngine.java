@@ -750,6 +750,31 @@ final class DramaEngine
 		}
 
 		final long now = System.currentTimeMillis();
+		// Nobody to play for (v0.2.3): with no real human online the world
+		// goes quiet - no new drama, no duels, and (see brainSubmit) no brain
+		// calls - instead of talking to an empty server. A cloud brain bills
+		// every line; a local one burns the GPU for nobody. A fight already
+		// running still finishes on its own heartbeat, just silently.
+		if (!humanOnline())
+		{
+			if (!_idleAnnounced)
+			{
+				_idleAnnounced = true;
+				if (_infoHook != null)
+				{
+					_infoHook.accept("clan-personalities: [IDLE] no real player online - drama, duels and brain calls pause until one logs in.");
+				}
+			}
+			return;
+		}
+		if (_idleAnnounced)
+		{
+			_idleAnnounced = false;
+			if (_infoHook != null)
+			{
+				_infoHook.accept("clan-personalities: [IDLE] a real player is online again - the clans pick the drama back up.");
+			}
+		}
 		// Field fights own the stage: while a duel is live (or its aftermath
 		// is still settling), no NEW drama opens anywhere - the world's
 		// clans are supposed to be watching the steel.
@@ -5100,8 +5125,39 @@ final class DramaEngine
 				{
 					return false; // still trading words
 				}
-				// WHO swings first: the side that did more of the stirring.
-				final boolean aSnaps = (fight.aggressionA == fight.aggressionB) ? Rnd.nextBoolean() : (fight.aggressionA > fight.aggressionB);
+				// WHO swings first: the side that did more of the stirring -
+				// but a Peaceful clan never throws the first blow (v0.2.3).
+				boolean aSnaps = (fight.aggressionA == fight.aggressionB) ? Rnd.nextBoolean() : (fight.aggressionA > fight.aggressionB);
+				final ClanProfile peaceCheckA = _profiles.get(fight.clanAId);
+				final ClanProfile peaceCheckB = _profiles.get(fight.clanBId);
+				final boolean peacefulA = (peaceCheckA != null) && (peaceCheckA.getPersona() == PersonaType.PEACEFUL);
+				final boolean peacefulB = (peaceCheckB != null) && (peaceCheckB.getPersona() == PersonaType.PEACEFUL);
+				if (peacefulA && peacefulB)
+				{
+					// Two Peaceful clans: rarely, one of them does lose its
+					// temper; otherwise nobody swings and the duel is dropped.
+					if (Rnd.get(100) >= _peacefulEngageChance)
+					{
+						if (_infoHook != null)
+						{
+							_infoHook.accept("clan-personalities: [FIELD-PEACE] " + why + ", but both sides are Peaceful and neither will throw the first blow - the duel is dropped.");
+						}
+						endFight(fight, null, "neither side would throw the first blow - both walked away");
+						return true;
+					}
+					if (_infoHook != null)
+					{
+						_infoHook.accept("clan-personalities: [FIELD-PEACE] both sides are Peaceful, but one of them loses its patience after all (" + _peacefulEngageChance + "% roll).");
+					}
+				}
+				else if (peacefulA && aSnaps)
+				{
+					aSnaps = false; // the other side swings; the Peaceful one only answers
+				}
+				else if (peacefulB && !aSnaps)
+				{
+					aSnaps = true;
+				}
 				final List<Player> snapSide = aSnaps ? aliveA : aliveB;
 				final Player striker = snapSide.get(Rnd.get(snapSide.size()));
 				if (_infoHook != null)
@@ -5137,10 +5193,17 @@ final class DramaEngine
 					}, 1500 + Rnd.get(2500));
 				}
 			}
-			crowdGossipBeat(fight, aliveA, aliveB, now2);
+			// v0.2.3: once blows fly the crowd still talks only for a real
+			// human in earshot. Before this, gossip, fighter replies and fan
+			// cheers ran for an empty field (13 local lines nobody heard).
+			final boolean heard = humanInEarshot(fight);
+			if (heard)
+			{
+				crowdGossipBeat(fight, aliveA, aliveB, now2);
+			}
 			// The peanut gallery does not stay quiet: whoops and boos ride
 			// the local air, a couple of beats apart through the duel.
-			if (!fight.spectators.isEmpty() && (fight.spectatorBeats < 6) && ((now2 - fight.lastSpectatorMillis) >= 22000))
+			if (heard && !fight.spectators.isEmpty() && (fight.spectatorBeats < 6) && ((now2 - fight.lastSpectatorMillis) >= 22000))
 			{
 				fight.lastSpectatorMillis = now2;
 				fight.spectatorBeats++;
@@ -6375,6 +6438,27 @@ final class DramaEngine
 		return false;
 	}
 
+	/** v0.2.3: a REAL human close enough to hear the crowd's local chat.
+	 *  Fans ring the field at 550-800 and local chat carries 1250, so
+	 *  anyone within 2000 of the arena centre can hear some of it. */
+	private boolean humanInEarshot(FieldFight fight)
+	{
+		for (Player online : allPlayers())
+		{
+			if (!isHumanWatcher(fight, online))
+			{
+				continue;
+			}
+			final long dx = online.getX() - fight.arenaX;
+			final long dy = online.getY() - fight.arenaY;
+			if (((dx * dx) + (dy * dy)) <= 4000000L)
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
 	/** True when a REAL human stands near the arena fence OR anywhere along
 	 *  the breadcrumb road from the Gatekeeper to the arena - phantoms of
 	 *  the world's cameras and the duel's own champions don't count. */
@@ -6701,6 +6785,15 @@ final class DramaEngine
 	}
 
 	/** Close a duel: unlock, stand down, and let the world hear the end. */
+	/** v0.2.3: odds (%) that one of two Peaceful clans throws the first
+	 *  blow after all; otherwise their duel is dropped. */
+	private int _peacefulEngageChance = 30;
+
+	void setPeacefulEngageChance(int chance)
+	{
+		_peacefulEngageChance = Math.max(0, Math.min(100, chance));
+	}
+
 	private void endFight(FieldFight fight, List<Player> winnerSide, String note)
 	{
 		fight.running = false;
@@ -7773,6 +7866,21 @@ final class DramaEngine
 	/** Submit one module brain job through the single-slot gate. */
 	private void brainSubmit(Runnable work)
 	{
+		if (!humanOnline())
+		{
+			// v0.2.3: no real human online, no brain call. Queued beats and a
+			// fight still running land here and simply stay silent.
+			if (!_idleDropNoted)
+			{
+				_idleDropNoted = true;
+				if (_infoHook != null)
+				{
+					_infoHook.accept("clan-personalities: [IDLE] a line was due but nobody is online to hear it - skipped (further skips this idle stretch are not logged).");
+				}
+			}
+			return;
+		}
+		_idleDropNoted = false;
 		synchronized (_brainLine)
 		{
 			if (_brainSlotBusy)
@@ -8448,11 +8556,41 @@ final class DramaEngine
 		{
 			return false;
 		}
-		if (brew[0] < _brewBeats)
+		if (brew[0] < (_brewBeats * (alliedPairKey(key) ? _allianceBrewFactor : 1)))
+		{
+			return false; // brothers bicker longer before they draw steel (v0.2.3)
+		}
+		return (now - brew[1]) >= _brewMinMillis;
+	}
+
+	/** v0.2.3: an alliance pair's brew needs this many times the usual
+	 *  bicker beats before it may reach steel. With few alliances and many
+	 *  clans, most quarrels are between brothers; this keeps their duels
+	 *  possible but rarer. 1 = the old behavior. */
+	private int _allianceBrewFactor = 2;
+
+	void setAllianceBrewFactor(int factor)
+	{
+		_allianceBrewFactor = Math.max(1, Math.min(5, factor));
+	}
+
+	private boolean alliedPairKey(String key)
+	{
+		final int dash = key.indexOf('-');
+		if (dash <= 0)
 		{
 			return false;
 		}
-		return (now - brew[1]) >= _brewMinMillis;
+		try
+		{
+			final ClanProfile low = _profiles.get(Integer.parseInt(key.substring(0, dash)));
+			final ClanProfile high = _profiles.get(Integer.parseInt(key.substring(dash + 1)));
+			return (low != null) && low.isAlliedWith(high);
+		}
+		catch (NumberFormatException e)
+		{
+			return false;
+		}
 	}
 
 	/** A glowing +10 weapon, so a post catches the eye in a crowd. */
@@ -8886,6 +9024,39 @@ final class DramaEngine
 		}
 		final org.l2jmobius.gameserver.network.GameClient client = player.getClient();
 		return (client != null) && !client.isDetached();
+	}
+
+	// ── Is anyone real here? (v0.2.3) ───────────────────────────────────
+	private volatile boolean _idleAnnounced;
+	private volatile boolean _idleDropNoted;
+	private volatile long _humanCheckedAt;
+	private volatile boolean _humanCached = true;
+
+	/**
+	 * True while at least one real human is connected (same rule as the
+	 * duel watchers: phantoms, living-population bots, offline traders and
+	 * detached clients don't count). Cached for 5 s - it is asked for every
+	 * brain line.
+	 */
+	private boolean humanOnline()
+	{
+		final long now = System.currentTimeMillis();
+		if ((now - _humanCheckedAt) < 5000L)
+		{
+			return _humanCached;
+		}
+		boolean found = false;
+		for (Player player : World.getInstance().getPlayers())
+		{
+			if (isHumanWatcher(null, player))
+			{
+				found = true;
+				break;
+			}
+		}
+		_humanCached = found;
+		_humanCheckedAt = now;
+		return found;
 	}
 
 	private List<Player> allPlayers()
