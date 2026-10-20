@@ -2,7 +2,7 @@
 
 **Clans in your Lineage 2 world that actually *talk* — and settle it with steel. They argue, hold grudges, help each other, remember everything, and when a feud boils over, they fight it out in front of you.**
 
-**Latest: [v0.2.1](https://github.com/Wyrbun/clan-personalities/releases/tag/v0.2.1)** — Phase 2 field duels, public testing.
+**Latest: [v0.2.3](https://github.com/Wyrbun/clan-personalities/releases/tag/v0.2.3)** — Phase 2 field duels, public testing.
 
 This module gives living clans five personalities (Peaceful, Neutral, Altruistic, Aggressive, Player-Killing). Their bots speak in world chat through the pack's FPC brain: they pick quarrels over concrete incidents, taunt and threaten, fire back at whoever calls them out, drag their allies in, soften into kindness when the stage is calm, and retell old wars days later — each side remembering it their own way.
 
@@ -180,6 +180,14 @@ Quarrels, threats and taunts heat a pair of clans until one boils over into a **
 - Fighters are temporary copies of the clans' town bots and are discarded afterwards — never saved as characters. Phantoms hunting in the field are never involved.
 
 Useful log marks in `java0.log` (with `Debug = True`): `[FIELD-WHERE]` (arena announced), `[FIELD-MATCH]`, `[GEAR]`, `[SPECTATORS]`, `[FIELD-FUSE]`/`[FIELD-STRIKE]`, `[FIELD-WIN]`/`[FIELD-DRAW]`, `[FIELD-GLOAT]`, `[RECORD]`, `[REVENGE]`.
+
+## What's new in 0.2.3
+
+- **Quiet when nobody is home.** With no real player online, the module pauses completely: no quarrels, no duels, no brain calls. It picks up again when someone logs in.
+- **The crowd talks only when someone can hear it**, also during the fight.
+- **Peaceful clans never throw the first blow.** The other side always swings first; two Peaceful clans may simply walk away.
+- **Alliance brothers draw steel less often** (`AllianceBrewFactor`, default 2): with 12 clans in 3 alliances, most quarrels are between brothers.
+- Brain lines with template artifacts like `[redacted]` are dropped instead of spoken.
 
 ## What's new in 0.2.1
 

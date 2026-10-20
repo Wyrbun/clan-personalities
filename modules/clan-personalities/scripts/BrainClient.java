@@ -392,7 +392,31 @@ final class BrainClient
 			return null;
 		}
 		final String capped = oneLine.length() > MAX_REPLY_LENGTH ? oneLine.substring(0, MAX_REPLY_LENGTH).trim() : oneLine;
+		if (hasModelArtifact(capped))
+		{
+			return null; // skipped, never patched up: same rule as a brain miss
+		}
 		return capped.isEmpty() ? null : capped;
+	}
+
+	/**
+	 * v0.2.3: model artifacts that no player would type - template brackets
+	 * ("[redacted]", "[name]", "{clan}") and redaction words. A line that
+	 * carries one is dropped whole: the module never edits the brain's words
+	 * (typos stay), it only refuses lines that are not speech.
+	 */
+	static boolean hasModelArtifact(String line)
+	{
+		if (line == null)
+		{
+			return false;
+		}
+		if ((line.indexOf('[') >= 0) || (line.indexOf(']') >= 0) || (line.indexOf('{') >= 0) || (line.indexOf('}') >= 0))
+		{
+			return true;
+		}
+		final String lower = line.toLowerCase();
+		return lower.contains("redacted") || lower.contains("placeholder");
 	}
 
 	/**
