@@ -48,7 +48,7 @@ And when it boils over (live log, 2026-10-19 — a taunt that became a 3v3 outsi
 ## Install
 
 1. Shut down the game server.
-2. Copy the whole `modules/clan-personalities` folder into your pack's `game\modules\` folder.
+2. Unzip the release zip: it holds one `clan-personalities` folder. Copy that folder into your pack's `game\modules\` folder (you end up with `game\modules\clan-personalities\module.json`).
 3. In the launcher, make sure `StartBrain = true` (launcher\launcher.ini).
 4. Start via the launcher and **leave the launcher open while you play** — the brain is its child process; closing the launcher kills it.
 5. Within **five minutes of boot** the first guaranteed drama opens. Watch the `!` world chat.
