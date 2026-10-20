@@ -1,10 +1,10 @@
 {
   "id": "clan-personalities",
   "name": "Clan Personalities",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "apiVersion": "1",
   "entrypoint": "modules.clanpersonalities.ClanPersonalityModule",
-  "description": "Living-world social sim: assigns personas (Peaceful, Neutral, Altruistic, Aggressive, Player-Killing) to living clans whose phantom members chatter, start drama and retaliate in chat, remembering what was said. Every word comes from the pack's FPC brain, composed on its own executor so the game's timers never wait; optional Phase 2 field duels ship behind the Phase2 switch (off by default).",
+  "description": "Living clans with personalities that talk AND fight. Five personas (Peaceful, Neutral, Altruistic, Aggressive, Player-Killing) drive world-chat drama written live by the pack's FPC brain: quarrels, taunts, threats, alliances and remembered grudges. When a feud boils over, the clans settle it in a real NPC-vs-NPC duel outside a town gate - fair level and gear matching, class roles (healers heal, mages cast), a gossiping crowd, gloating winners, and win/loss records with revenge that persist across restarts. Requires the FPC brain. Duels on by default (Phase2 = False for chat only).",
   "author": "thiag",
   "priority": 100,
   "dependencies": [],

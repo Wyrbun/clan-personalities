@@ -59,7 +59,7 @@ Personas are dealt once and kept between restarts (`personas.properties`, writte
 
 ## How it behaves
 
-- **Personas**: Peaceful never starts anything and answers provocation with exactly one calm line; Neutral defends only its own name; Altruistic answers for any clan under its alliance banner, even when the brother threw the first stone; Aggressive starts fights and drags its alliance in; Player-Killing talks like Aggressive (Phase 2 field brawls ride in the code behind the `Phase2` switch, off by default).
+- **Personas**: Peaceful never starts anything and answers provocation with exactly one calm line; Neutral defends only its own name; Altruistic answers for any clan under its alliance banner, even when the brother threw the first stone; Aggressive starts fights and drags its alliance in; Player-Killing talks like Aggressive (its real field duels are Phase 2, on by default since 0.2.0 — see below).
 - **The world witnesses it**: the default channel is SHOUT — world chat. Pack bots and real players react to the drama, and clan-less bystanders may ask what a nickname means, or what an old war was about.
 - **Proper exchanges** (`QuestionChance`): the called-out clan may first demand *"what do you want from us?"* — the accuser explains its side (grounded in a concrete incident like *kill-stealing mobs* or *spawn camping*), and only then comes the comeback. Every question earns an answer.
 - **One voice per clan**: the SAME bot keeps arguing a quarrel while he is present. A present higher rank may take over and introduce himself; if a clan keeps switching talkers, the other side may ask who now speaks — once per argument.
@@ -150,9 +150,34 @@ All in `modules/clan-personalities/config/module.ini`. Values below are the ship
 |---|---|---|
 | `BrainUrl` | `http://127.0.0.1:5000/chat` | The pack's FPC brain endpoint |
 | `BrainTimeoutMillis` | `45000` | One generation can legitimately take 20–40 s; keep ≥ 45000 |
-| `BrainHumanFlag` | `True` | Drama lines knock on the brain's anti-spam door as human speech (see MODULE.md). Flip to `False` when the brain ships its module-directed mode |
-| `BrainDirectedHeader` | `clan-personalities` | Sent as `X-Directed-By` on every request — the reserved handshake for that future brain mode |
+| `BrainVoiceMode` | `PARTYEVENT` | The brain's directed one-line door: the module describes the moment, the bot says one line, and nothing touches the brain's shared shout log. `LEGACY` = the old SHOUT/SAY door (fallback only) |
+| `BrainHumanFlag` | `True` | LEGACY door only — ignored on PARTYEVENT, where `X-Human` is never sent |
+| `BrainDirectedHeader` | `clan-personalities` | Sent as `X-Directed-By` on every request, so the brain can recognise module traffic |
 | `MemorySize` | `60` | Recent lines retained in RAM for adaptation |
+
+## Phase 2 — field duels (on by default; `Phase2 = False` for chat only)
+
+Quarrels, threats and taunts heat a pair of clans until one boils over into a **real duel** — the pack's own combat, no scripted outcome:
+
+- The arena is announced in world chat: open ground just outside a town gate, clear of guards and monsters. Spectators spawn first and gossip about the fighters' class, gear and record while you walk over; the fighters answer them.
+- The fight waits for you. Once you stand at the fence (`FenceRadius`, 900 — every local line in earshot), the fighters trade jabs that fill a hidden aggression meter, then strike. Standing very close (600) speeds it up.
+- Fair by construction: fighters are matched by level (`MaxLevelGap`) and gear (`MaxGearGap`), handed weapons their own skills can use, and fight in their class role — casters cast and never melee; PvP-useless skills (Spoil, Sweeper, Fake Death…) are blocklisted.
+- Different alliances are preferred as rivals; a same-alliance fight still happens, and the crowd notices.
+- Winners gloat, losers fume (and may name the allies who didn't show). Results persist in `records.properties`: the next quarrel brings them up, and losers want revenge (`RevengeBoost`).
+- Fighters are temporary copies of the clans' town bots and are discarded afterwards — never saved as characters. Phantoms hunting in the field are never involved.
+
+Useful log marks in `java0.log` (with `Debug = True`): `[FIELD-WHERE]` (arena announced), `[FIELD-MATCH]`, `[GEAR]`, `[SPECTATORS]`, `[FIELD-FUSE]`/`[FIELD-STRIKE]`, `[FIELD-WIN]`/`[FIELD-DRAW]`, `[FIELD-GLOAT]`, `[RECORD]`, `[REVENGE]`.
+
+## What's new in 0.2.0
+
+**Phase 2 is complete, ready for public testing, and now on by default** (`Phase2 = True`; set it to `False` for chat-only drama). Plus:
+
+- **One quarrel at a time** (`DramaFocus`): new openings wait while an argument still breathes, so the world reads one story, not four.
+- **Taunts**: Aggressive and Player-Killing clans dare rivals toward a real fight.
+- **Threat reading**: quarrel lines are read as threat, provocation or ambiguous; an unclear threat may get a "do you mean it?" — and the answer heats or cools the feud.
+- **Directed brain mode** (`BrainVoiceMode = PARTYEVENT`): bots answer the drama instead of drifting into whatever the world was shouting about; multi-line replies are cut to one line.
+- **Persistent duel records and revenge** (`records.properties`).
+- **Kinder to the shared brain** (review follow-up): at most one module turn sits on the pack's brain pool at a time — players' whispers and party replies always find a free worker; after a brain failure, module lines are dropped at once instead of parking a worker for a minute; `X-Human` is no longer sent on the directed door; and the warm-keeper now counts only *human* players (bots are Players too — the old check never let the model cool).
 
 ## What's new in 0.1.1
 
@@ -206,12 +231,13 @@ Production hardening, driven by a real reviewer's test report — no new drama f
 - **Replies feel too fast or too slow** — tune `MinBeatSpacingSeconds` and the reply bands.
 - **Boot log warns about unconfigured clans** — misspelled or never-matching keys in `LivingClanIds`; the module will retry each boot.
 - **Log your session**: with `Debug = True` every delivered line appears in `game\log\java0.log` with kind, speaker and text.
-- **Known pack issue (not this module)**: the pack's `LivingPopulationManager` may log a harmless NPE from `placeShopkeeper` per tick; it is pre-existing pack behavior.
+- **Known pack issue (not this module)**: a `NullPointerException` from `placeShopkeeper` about once per Living Population tick. The full stack is pack code only — `Spawn.doSpawn` with a null `_template`, called from `FakePlayerBehaviorManager.placeBot (:765)` ← `placeShopkeeper (:645)` ← `LivingPopulationManager.syncShopkeepers (:361)` ← `safeSnapshotTick (:2899)` — and it appears with this module disabled too. Reported to the pack author.
+- **No duel ever starts** (Phase 2) — check `Phase2 = True`, then look for `[FIELD-SCAN]`/`[FIELD-TRY]` tallies in the log: they say why each town's arena was rejected. A fight only begins once you stand near the arena (`FenceRadius`) or `FenceMaxWaitSeconds` runs out.
 
 ## Roadmap
 
 - **Phase 1 — chat drama**: conversation engine, exchanges, kindness, war stories. *(shipped)*
-- **Phase 2 — field duels**: equal-gear clan brawls staged in the field outside major towns, march/run theaters, herald trails, spectator crowds, a fight bank that makes fights earned and paced. *(in the code behind `Phase2 = True`; validated release to follow as 0.2.0)*
+- **Phase 2 — field duels**: fair, real clan duels outside town gates, crowds, gloating, persistent records and revenge. *(shipped in 0.2.0, public testing; on by default)*
 - **Phase 3 — deployment politics**: PK-punishment hunts, adena bounties, ally assists: personas acting in the world, not only speaking.
 
 ## License

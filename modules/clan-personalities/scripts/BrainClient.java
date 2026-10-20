@@ -57,7 +57,7 @@ final class BrainClient
 	private final String _url;
 	private final int _timeoutMillis;
 	private final Object _callLock = new Object();
-	private long _retryAt = 0;
+	private volatile long _retryAt = 0;
 	private volatile Thread _keeper = null;
 	private volatile boolean _keeperStop = false;
 	/**
@@ -75,6 +75,13 @@ final class BrainClient
 	 * bot learns our WORLD LAW rules as world chat.
 	 */
 	private volatile String _directedBy = null;
+	/** Which brain door module lines use. PARTYEVENT (default): the brain's
+	 *  directed one-line mode - the body describes the moment, the bot says
+	 *  ONE line for it, with NO shared shout backlog around it and nothing
+	 *  filed into that backlog. SHOUT/SAY (legacy): the line poses as a
+	 *  shout the bot overhears, wrapped in the last 12 world lines - which
+	 *  is why bots answered essence prices instead of the drama. */
+	private volatile String _voiceMode = "PARTYEVENT";
 
 	BrainClient(String url, int timeoutMillis)
 	{
@@ -83,6 +90,11 @@ final class BrainClient
 	}
 
 	/** Which spam-filter doors the module knocks on (config-wired). */
+	void setVoiceMode(String voiceMode)
+	{
+		_voiceMode = ((voiceMode != null) && voiceMode.trim().equalsIgnoreCase("LEGACY")) ? "LEGACY" : "PARTYEVENT";
+	}
+
 	void setHeaders(boolean humanFlag, String directedBy)
 	{
 		_humanFlag = humanFlag;
@@ -175,7 +187,7 @@ final class BrainClient
 			connection.setRequestProperty("Content-Type", "text/plain; charset=utf-8");
 			connection.setRequestProperty("X-FPC", "BrainCheck");
 			connection.setRequestProperty("X-Mode", "SAY");
-			if (_humanFlag)
+			if (_humanFlag && "LEGACY".equals(_voiceMode))
 			{
 				connection.setRequestProperty("X-Human", "true"); // exempt the probe from topic-cooldown kills too
 			}
@@ -224,21 +236,19 @@ final class BrainClient
 		{
 			return null;
 		}
+		// The breaker is open: fail FAST. A beat that waited out the minute
+		// would sit on one of the pack's shared BrainExecutor workers doing
+		// nothing, and those workers also serve players' whispers and
+		// party replies. The dropped beat simply doesn't happen.
+		if (System.currentTimeMillis() < _retryAt)
+		{
+			return null;
+		}
 		synchronized (_callLock)
 		{
-			// The breaker is open: wait it out HERE, holding the lock, so
-			// the whole queue of pending beats resumes the instant it
-			// closes instead of everyone racing their own retries.
-			while (System.currentTimeMillis() < _retryAt)
+			if (System.currentTimeMillis() < _retryAt)
 			{
-				try
-				{
-					_callLock.wait(Math.min(10000, _retryAt - System.currentTimeMillis()));
-				}
-				catch (InterruptedException e)
-				{
-					return null;
-				}
+				return null; // a caller ahead of us just opened it
 			}
 			return lineLocked(botName, location, mode, prompt);
 		}
@@ -256,7 +266,14 @@ final class BrainClient
 			connection.setDoOutput(true);
 			connection.setRequestProperty("Content-Type", "text/plain; charset=utf-8");
 			connection.setRequestProperty("X-FPC", botName != null ? botName : "a phantom");
-			connection.setRequestProperty("X-Mode", ("SHOUT".equals(mode)) ? "SHOUT" : "SAY");
+			final boolean directed = "PARTYEVENT".equals(_voiceMode);
+			connection.setRequestProperty("X-Mode", directed ? "PARTYEVENT" : (("SHOUT".equals(mode)) ? "SHOUT" : "SAY"));
+			if (directed)
+			{
+				// The brain frames PARTYEVENT bots as a party member; say plainly
+				// that this one is a clan member typing in world chat instead.
+				connection.setRequestProperty("X-Role", "clan member (not in any party right now)");
+			}
 			// The brain's anti-spam layer treats unmarked bot chatter as self-initiated:
 			// once a topic (a rival clan's name, the cause words) dominates shout for a
 			// moment it lands on a 4-minute cooldown, and every further request that
@@ -268,7 +285,10 @@ final class BrainClient
 			// the brain grows a proper module-directed mode, the deployer flips the
 			// flag off and the X-Directed-By header takes over, so the brain can keep
 			// composed prompts out of its shared shout log and re-enable its checks.
-			if (_humanFlag)
+			// PARTYEVENT is the brain's own directed door: nothing is filed in
+			// the shout log there, so posing as human buys nothing and only
+			// muddies the brain's view. X-Human goes out on the LEGACY door only.
+			if (_humanFlag && !directed)
 			{
 				connection.setRequestProperty("X-Human", "true");
 			}
@@ -281,7 +301,10 @@ final class BrainClient
 				connection.setRequestProperty("X-Location", location);
 			}
 
-			final byte[] body = prompt.getBytes(StandardCharsets.UTF_8);
+			final String framed = "PARTYEVENT".equals(_voiceMode)
+				? ("You are NOT in a party right now: you are typing ONE line in the server-wide " + (("SHOUT".equals(mode)) ? "world (shout)" : "local") + " chat, as a member of your clan, about what is happening between the clans. Stay strictly on this moment - no party calls, no prices, no unrelated chatter.\n\nWhat is happening: " + prompt)
+				: prompt;
+			final byte[] body = framed.getBytes(StandardCharsets.UTF_8);
 			connection.getOutputStream().write(body);
 			connection.getOutputStream().flush();
 
@@ -291,21 +314,24 @@ final class BrainClient
 				return null;
 			}
 
-			final StringBuilder reply = new StringBuilder();
+			// Collect the raw bytes first and decode ONCE: decoding each network
+			// chunk on its own can split an accented letter (two UTF-8 bytes)
+			// across chunks and turn it into "?".
+			final java.io.ByteArrayOutputStream raw = new java.io.ByteArrayOutputStream();
 			final InputStream input = connection.getInputStream();
 			byte[] buffer = new byte[2048];
 			int read;
 			while ((read = input.read(buffer)) >= 0)
 			{
-				reply.append(new String(buffer, 0, read, StandardCharsets.UTF_8));
-				if (reply.length() > MAX_REPLY_LENGTH)
+				raw.write(buffer, 0, read);
+				if (raw.size() > (MAX_REPLY_LENGTH * 4))
 				{
 					break;
 				}
 			}
 			input.close();
 
-			final String line = sanitize(reply.toString(), botName);
+			final String line = sanitize(new String(raw.toByteArray(), StandardCharsets.UTF_8), botName);
 			return line;
 		}
 		catch (Exception e)
@@ -326,8 +352,8 @@ final class BrainClient
 	}
 
 	/**
-	 * The breaker: silence for a minute, then the next queued beat tries
-	 * again. Every caller blocked on the lock wakes as soon as it lifts.
+	 * The breaker: silence for a minute - every beat in that minute is
+	 * dropped at once - then the next beat tries again.
 	 */
 	private void openBreaker()
 	{
@@ -345,7 +371,22 @@ final class BrainClient
 		{
 			return null;
 		}
-		final String oneLine = stripNameArtifact(text.replace("\r", " ").replace("\n", " ").trim(), botName);
+		// ONE line: the brain sometimes returns several chat lines at once;
+		// gluing them made one shout carry two or three unrelated messages.
+		String first = null;
+		for (String part : text.replace("\r", "\n").split("\n"))
+		{
+			if (!part.trim().isEmpty())
+			{
+				first = part.trim();
+				break;
+			}
+		}
+		if (first == null)
+		{
+			return null;
+		}
+		final String oneLine = stripNameArtifact(first, botName);
 		if (oneLine == null)
 		{
 			return null;

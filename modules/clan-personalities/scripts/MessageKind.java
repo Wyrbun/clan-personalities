@@ -17,5 +17,8 @@ enum MessageKind
 	KINDNESS, // a helpful or friendly gesture toward another clan
 	PRAISE, // the helped clan returning thanks for a kindness
 	COCKY, // the helper playing cool about the received thanks
-	HISTORY // an OLD quarrel remembered aloud; may draw a world question
+	HISTORY, // an OLD quarrel remembered aloud; may draw a world question
+	TAUNT, // a hot-blooded clan goading another into a real field fight; opens an arc
+	INTENT_ASK, // a clan unsure whether a line was a threat asks if they mean it
+	INTENT_ANSWER // the speaker confirms the threat or waves it off as trash talk
 }

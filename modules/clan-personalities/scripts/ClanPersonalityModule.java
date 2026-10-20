@@ -132,6 +132,7 @@ public final class ClanPersonalityModule implements GameModule
 		// the human flag is still needed while the brain lacks a directed-
 		// lines mode; X-Directed-By is always announced for that future mode.
 		_brainClient.setHeaders(context.config().getBoolean("BrainHumanFlag", true), context.config().getString("BrainDirectedHeader", "clan-personalities"));
+		_brainClient.setVoiceMode(context.config().getString("BrainVoiceMode", "PARTYEVENT"));
 		final DramaEngine bootEngine = engine;
 		final BrainClient bootBrain = _brainClient;
 		final Thread probeThread = new Thread(() ->
@@ -148,7 +149,7 @@ public final class ClanPersonalityModule implements GameModule
 			// The warm-keeper starts only NOW - a successful probe, and
 			// gated on actual players: with nobody in the world the model
 			// is allowed to cool, which costs nothing between sessions.
-			bootBrain.startKeeper(() -> !World.getInstance().getPlayers().isEmpty());
+			bootBrain.startKeeper(ClanPersonalityModule::anyHumanOnline);
 		}, "clan-personalities-boot-probe");
 		probeThread.setDaemon(true);
 		probeThread.start();
@@ -253,9 +254,38 @@ public final class ClanPersonalityModule implements GameModule
 			}
 		}
 		engine.setChallengeCues(challengeCues, context.config().getInt("ChallengeFightChance", 35));
-		engine.setGuardClearRadius(context.config().getInt("GuardClearRadius", 900));
+		engine.setGuardClearRadius(context.config().getInt("GuardClearRadius", 350));
+
+		// Drama focus: one quarrel develops at a time. While an argument is
+		// still breathing, NEW openings (quarrels, taunts, chatter callouts)
+		// wait; once it resolves, the stage breathes, then the next one lands.
+		engine.setDramaFocus(context.config().getBoolean("DramaFocus", true), context.config().getInt("FocusStaleSeconds", 120) * 1000L, context.config().getInt("FocusBreatherSeconds", 45) * 1000L);
+
+		// Taunts: Aggressive and Player-Killing clans goad others toward a
+		// real field fight, each on its own cooldown plus a world-wide one.
+		engine.setTaunts(context.config().getInt("TauntChance", 20), context.config().getInt("TauntCooldownMinutes", 15) * 60000L, context.config().getInt("TauntGlobalCooldownMinutes", 6) * 60000L);
+
+		// Reading intent: lines aimed at a clan are read as an open threat,
+		// trash-talk provocation, or something in between - which the
+		// target may ask about, and the speaker confirms or waves off.
+		engine.setIntentReading(context.config().getBoolean("ReadThreats", true), context.config().getInt("ThreatClarifyChance", 50), context.config().getInt("ThreatClarifyCooldownSeconds", 300) * 1000L,
+			splitCues(context.config().getString("ThreatCues", DEFAULT_THREAT_CUES)),
+			splitCues(context.config().getString("BanterCues", DEFAULT_BANTER_CUES)),
+			splitCues(context.config().getString("ProvocationCues", DEFAULT_PROVOKE_CUES)));
+		engine.setArenaSiting(context.config().getInt("MonsterClearRadius", 700), context.config().getInt("ArenaTownTries", 0));
 		engine.setFieldLeadSeconds(context.config().getInt("FieldLeadSeconds", 90));
-		engine.setFieldHeralds(context.config().getInt("FieldHeralds", 5));
+		engine.setFieldHeralds(context.config().getInt("FieldHeralds", 0));
+		engine.setMaxLevelGap(context.config().getInt("MaxLevelGap", 5));
+		engine.setMaxGearGap(context.config().getInt("MaxGearGap", 6));
+		engine.setFenceRadius(context.config().getInt("FenceRadius", 900));
+		engine.setVeryClose(context.config().getInt("VeryCloseRadius", 600), context.config().getInt("VeryCloseJabSeconds", 5) * 1000L, context.config().getInt("VeryCloseFenceSeconds", 25) * 1000L);
+		engine.setFieldSkillBlacklist(splitCues(context.config().getString("FieldSkillBlacklist", "Spoil,Spoil Festival,Sweeper,Festival Sweeper,Sow,Harvesting,Fake Death")));
+		// Clan records: completed duel results and how each pair's last
+		// quarrel ended, kept in records.properties across restarts; a clan
+		// that lost its last duel to a rival is pulled back toward it.
+		engine.setRecordFile(recordStateFile(), context.config().getInt("RevengeBoost", 3));
+		final int[] aggroBand = parseBand(context.config().getString("AggressionPerJab", "12-22"), 12, 22);
+		engine.setFieldFuse(aggroBand[0], aggroBand[1], context.config().getInt("FenceMaxWaitSeconds", 60) * 1000L, context.config().getInt("CrowdGossipSeconds", 14) * 1000L, context.config().getInt("CrowdGossipChance", 70), context.config().getInt("FighterAnswerChance", 60));
 		engine.setPlayerGrace(context.config().getInt("PlayerGraceRadius", 3000), context.config().getInt("PlayerRoadRadius", 2200), context.config().getInt("PlayerGraceMaxSeconds", 180) * 1000L);
 		engine.setSkirmishCooldowns(context.config().getInt("SkirmishCooldownSeconds", 240) * 1000L, context.config().getInt("SkirmishHeatStepSeconds", 90) * 1000L);
 		engine.setBrewRequirements(context.config().getInt("BrewBeatsForSteel", 3), context.config().getInt("BrewWindowSeconds", 900), context.config().getInt("BrewMinSeconds", 90));
@@ -285,12 +315,10 @@ public final class ClanPersonalityModule implements GameModule
 		engine.setSelfCorrectionChance(context.config().getInt("SelfCorrectionChance", 10));
 
 		// Alliance display names, for shorthand of alliance names in speech.
-		final Map<Integer, String> allianceNames = new LinkedHashMap<>();
-		for (Map.Entry<String, Integer> entry : allianceGroups.entrySet())
-		{
-			allianceNames.put(entry.getValue(), entry.getKey());
-		}
-		engine.setAllianceNames(allianceNames);
+		// Built from the NAMES in AllianceGroups ("PhoenixOrder:..."), in the
+		// same order the groups are numbered. (It used to take the last clan
+		// token of each group - so PhoenixOrder was called "ivorycrown".)
+		engine.setAllianceNames(parseAllianceNames(context.config().getString("AllianceGroups", "")));
 
 		// Debug: report every delivered line in the server log, kind, speaker
 		// and channel included. Off by default; turn on to prove the voice.
@@ -311,7 +339,54 @@ public final class ClanPersonalityModule implements GameModule
 		_tickTask = ThreadPool.scheduleAtFixedRate(engine::tick, period, period);
 		engine.armFirstDrama(); // the guaranteed early quarrel
 
+		// One-time cleanup of fighter clones the old release path saved as
+		// real characters (see MODULE.md). Off / Preview / Delete; runs once,
+		// a few minutes after boot, when the town bots are all in the world.
+		final String purge = context.config().getString("PurgeSavedClones", "Off").trim();
+		if (purge.equalsIgnoreCase("Preview") || purge.equalsIgnoreCase("Delete"))
+		{
+			final boolean purgeDelete = purge.equalsIgnoreCase("Delete");
+			// Preview is a READ-ONLY listing (by name, with accounts).
+			ThreadPool.schedule(() ->
+			{
+				if (purgeDelete)
+				{
+					engine.purgeSavedClones(true);
+				}
+				else
+				{
+					engine.listSavedClones();
+				}
+			}, 150000);
+			context.logging().info("clan-personalities: saved-clone cleanup armed in " + (purgeDelete ? "DELETE" : "PREVIEW") + " mode (runs ~150 s after boot).");
+		}
+
 		context.logging().info("clan-personalities active for " + engine.getPersonaClanCount() + " living clan(s).");
+	}
+
+	/** Default intent-reading cue lists (ini keys ThreatCues, BanterCues,
+	 *  ProvocationCues override them). Matching is case-insensitive and
+	 *  word-bounded, so "kill you" never fires inside "kill log". */
+	private static final String DEFAULT_THREAT_CUES = "watch your back,watch your backs,watch their back,watch their backs,you're dead,youre dead,you are dead,gonna regret,will regret,you'll regret,pay for this,pay for that,gonna pay,will pay for,hunt you,hunt them,hunt you down,kill you,kill them,kill 'em,end you,crush you,crush them,crush 'em,lose a finger,bleed,meet me outside,catch me outside,come fight,bring it,fight me,last warning,or else,count your days,sleep with one eye,coming for you,coming for them";
+	private static final String DEFAULT_BANTER_CUES = "lol,lmao,haha,hehe,rofl,xd,:p,:),;),:d,jk,just kidding,kidding,joking";
+	private static final String DEFAULT_PROVOKE_CUES = "all talk,noob,newbie,lowbie,get a life,clown,scrub,coward,cry more,crybaby,trash,pathetic,kiss my boots,lame";
+
+	private static List<String> splitCues(String raw)
+	{
+		final List<String> cues = new ArrayList<>();
+		if (raw == null)
+		{
+			return cues;
+		}
+		for (String cue : raw.split(","))
+		{
+			cue = cue.trim();
+			if (!cue.isEmpty())
+			{
+				cues.add(cue);
+			}
+		}
+		return cues;
 	}
 
 	@Override
@@ -495,6 +570,21 @@ public final class ClanPersonalityModule implements GameModule
 			}
 		}
 		return new File(dir, "personas.properties");
+	}
+
+	/** Duel results and quarrel endings per clan pair (records.properties). */
+	private static File recordStateFile()
+	{
+		File dir = new File(ModulesConfig.getModulesRoot(), "clan-personalities");
+		if (!dir.isDirectory())
+		{
+			final File fallback = new File("modules", "clan-personalities");
+			if (fallback.isDirectory())
+			{
+				dir = fallback;
+			}
+		}
+		return new File(dir, "records.properties");
 	}
 
 	// ── Brain-coined clan nicknames (nicknames.properties persists them) ──
@@ -714,6 +804,26 @@ public final class ClanPersonalityModule implements GameModule
 	 * or name/key words. Group numbers are stable only within a boot; it is
 	 * the name that carries identity in config.
 	 */
+	/** Group number -> alliance display name, numbered exactly like
+	 *  parseAllianceGroups ("Name:clan,clan;Name:clan,..."). */
+	private static Map<Integer, String> parseAllianceNames(String text)
+	{
+		final Map<Integer, String> result = new LinkedHashMap<>();
+		int group = 0;
+		for (String part : text.split(";"))
+		{
+			final int separator = part.lastIndexOf(':');
+			if (separator < 0)
+			{
+				continue;
+			}
+			group++;
+			final String name = part.substring(0, separator).trim();
+			result.put(group, name.isEmpty() ? ("alliance " + group) : name);
+		}
+		return result;
+	}
+
 	private static Map<String, Integer> parseAllianceGroups(String text)
 	{
 		final Map<String, Integer> result = new LinkedHashMap<>();
@@ -736,5 +846,29 @@ public final class ClanPersonalityModule implements GameModule
 			}
 		}
 		return result;
+	}
+	/**
+	 * The warm-keeper's gate: true only while a REAL player is connected.
+	 * Bots are Players too (phantoms, living-population town bots, offline
+	 * shops), so "the world is not empty" was always true and the keeper
+	 * pinged all night - money on a metered cloud brain. Phantoms, players
+	 * with no live client, and offline-mode traders do not count.
+	 */
+	private static boolean anyHumanOnline()
+	{
+		final org.l2jmobius.gameserver.managers.PhantomManager phantoms = org.l2jmobius.gameserver.managers.PhantomManager.getInstance();
+		for (org.l2jmobius.gameserver.model.actor.Player player : World.getInstance().getPlayers())
+		{
+			if ((player == null) || player.isInOfflineMode() || ((phantoms != null) && phantoms.isPhantom(player)))
+			{
+				continue;
+			}
+			final org.l2jmobius.gameserver.network.GameClient client = player.getClient();
+			if ((client != null) && !client.isDetached())
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 }
