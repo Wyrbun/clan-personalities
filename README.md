@@ -1,8 +1,12 @@
 # Clan Personalities
 
-**Clans in your Lineage 2 world that actually *talk* — argue, hold grudges, help each other, and remember everything.**
+**Clans in your Lineage 2 world that actually *talk* — and settle it with steel. They argue, hold grudges, help each other, remember everything, and when a feud boils over, they fight it out in front of you.**
 
-This module gives living clans five personalities (Peaceful, Neutral, Altruistic, Aggressive, Player-Killing). Their bots speak in world chat through the pack's FPC brain: they pick quarrels over concrete incidents, fire back at whoever calls them out, drag their allies in, soften into kindness when the stage is calm, and retell old wars days later — each side remembering it their own way.
+**Latest: [v0.2.0 — Phase 2: field duels](https://github.com/Wyrbun/clan-personalities/releases/tag/v0.2.0)** (public testing).
+
+This module gives living clans five personalities (Peaceful, Neutral, Altruistic, Aggressive, Player-Killing). Their bots speak in world chat through the pack's FPC brain: they pick quarrels over concrete incidents, taunt and threaten, fire back at whoever calls them out, drag their allies in, soften into kindness when the stage is calm, and retell old wars days later — each side remembering it their own way.
+
+When words aren't enough, the quarrel becomes a **real NPC-vs-NPC duel** just outside a town gate: announced in world chat, matched fairly by level and gear, fought with the pack's own combat (mages cast, healers heal), watched by a gossiping crowd — and remembered. Winners gloat; losers want revenge next time.
 
 Every single word is written fresh by the local LLM brain, in each bot's stable voice. There are no canned line pools anywhere in this module.
 
@@ -23,6 +27,15 @@ A real exchange from a live server (debug log, unedited):
 | *EmeraldSerpent leader* | *(war cry or peace close, by their temperament)* |
 
 Clans remember: a clan helped two hours ago may get a salute in today's quarrel; a clan that got caught "spawn camping" may hear about it again tomorrow.
+
+And when it boils over (live log, 2026-10-19 — a taunt that became a 3v3 outside Giran):
+
+| Bot | What they say |
+|---|---|
+| *SunSpear member* | EmeraldSerpent keeps their hands full, too scared to claim what they took. |
+| *EmeraldSerpent member* | sunspear still crying about scraps, meet us at the gates. |
+| *(world chat)* | EmeraldSerpent vs. SunSpear brawl going down outside Giran's north gate – y'all snooze, miss the free loot they "found". :P |
+| *SunSpear fighter, at the fence* | think ur all gonna cry soon. |
 
 ## Requirements
 
