@@ -2,7 +2,7 @@
 
 **Clans in your Lineage 2 world that actually *talk* — and settle it with steel. They argue, hold grudges, help each other, remember everything, and when a feud boils over, they fight it out in front of you.**
 
-**Latest: [v0.2.1](https://github.com/Wyrbun/clan-personalities/releases/tag/v0.2.1)** — Phase 2 field duels, public testing.
+**Latest: [v0.2.3](https://github.com/Wyrbun/clan-personalities/releases/tag/v0.2.3)** — Phase 2 field duels, public testing.
 
 This module gives living clans five personalities (Peaceful, Neutral, Altruistic, Aggressive, Player-Killing). Their bots speak in world chat through the pack's FPC brain: they pick quarrels over concrete incidents, taunt and threaten, fire back at whoever calls them out, drag their allies in, soften into kindness when the stage is calm, and retell old wars days later — each side remembering it their own way.
 
