@@ -165,7 +165,16 @@ final class DramaEngine
 	/** Widest level gap allowed between two paired fighters. */
 	private int _maxLevelGap = 5;
 	/** Widest gear-score gap allowed between two paired fighters. */
-	private int _maxGearGap = 6;
+	private int _maxGearGap = 3;
+	/** Normal duels roll 1..this per side; epic battles roll EpicSquadMin..EpicSquadMax. */
+	private int _fieldMaxSquad = 3;
+	private int _epicChance = 0;
+	private int _epicMin = 4;
+	private int _epicMax = 9;
+	/** A gear score at or below this is "bare": it only meets someone at most one point above it. */
+	private int _bareGearMax = 1;
+	/** 1v1 class pairings to avoid, "ATTACKER-VICTIM" by party role (DAGGER-NUKER...). */
+	private final Set<String> _avoidSolo = ConcurrentHashMap.newKeySet();
 	/** Skill names (lower case) never used in a field duel: monster-only or
 	 *  out-of-combat skills that make a fighter stall against a player. */
 	private final List<String> _fieldSkillBlacklist = new ArrayList<>(java.util.Arrays.asList("spoil", "spoil festival", "sweeper", "festival sweeper", "sow", "harvesting", "fake death"));
@@ -325,6 +334,14 @@ final class DramaEngine
 		/** Loud spectacles (3v3+) announce, guide and draw crowds; quiet
 		 *  duels (1v1/2v2) speak only between the two clans involved. */
 		volatile boolean loud;
+		/** An EPIC battle (4v4 and up): a war, not a duel - rarer, louder, longer runway. */
+		volatile boolean epic;
+		/** False for open villages with no wall (Talking Island...): no "gates" to name. */
+		volatile boolean gated = true;
+		/** Alliance pools were used: the sides are alliances, led by the two quarreling clans. */
+		volatile boolean allianceWar;
+		volatile String allianceA;
+		volatile String allianceB;
 		/** One-shot ferry markers for march stragglers. */
 		final Set<String> ferried = new LinkedHashSet<>();
 		/** Per-fighter playstyle memory, so the pack casts real skills. */
@@ -469,6 +486,24 @@ final class DramaEngine
 	/** How much stronger a lost duel pulls a clan back toward that rival. */
 	private int _revengeBoost = 3;
 	private final Object _recordLock = new Object();
+
+	// ── Grievances and alliance wars (user, 2026-10-21) ─────────────────
+	/** "AllianceA+AllianceB" (sorted) -> unsatisfied quarrel endings between them. Saved in records.properties. */
+	private final Map<String, Integer> _grievances = new ConcurrentHashMap<>();
+	/** Clan pair (arcKey) -> when its war cry goes stale if no duel follows. */
+	private final Map<String, Long> _pendingWarCries = new ConcurrentHashMap<>();
+	/** Alliance pairs whose next duel is a forced EPIC alliance war. */
+	private final Set<String> _warDue = ConcurrentHashMap.newKeySet();
+	private volatile long _grievanceClock; // play time (a human online) toward the next fade
+	private volatile long _grievanceLastTick;
+	/** Master switch for grievances, alliance wars and alliance pools (on hold for 0.3.0, user 2026-10-21). */
+	private volatile boolean _allianceWars = false;
+	private int _grievanceStep = 3;
+	private int _epicChanceCap = 40;
+	private int _allianceWarAt = 6;
+	private long _grievanceFadeMillis = 3L * 3600000L;
+	private long _warCryWindowMillis = 20L * 60000L;
+	private int _warAllyLines = 4;
 
 	// ── Drama focus: one quarrel develops at a time ──
 	/** While an argument is still developing, NEW openings (quarrels,
@@ -775,6 +810,7 @@ final class DramaEngine
 				_infoHook.accept("clan-personalities: [IDLE] a real player is online again - the clans pick the drama back up.");
 			}
 		}
+		grievanceTick(now);
 		// Field fights own the stage: while a duel is live (or its aftermath
 		// is still settling), no NEW drama opens anywhere - the world's
 		// clans are supposed to be watching the steel.
@@ -984,6 +1020,10 @@ final class DramaEngine
 		if ((profile == null) || (profile.getPersona() == null))
 		{
 			return; // not resolved, or persona-less since this was queued
+		}
+		if (accuseSulking(clanId))
+		{
+			return; // Phase 3: caught being nice - the clan has gone silent
 		}
 
 		final long now = System.currentTimeMillis();
@@ -1215,9 +1255,9 @@ final class DramaEngine
 			for (ClanProfile mentioned : clanMentions)
 			{
 				final String pairKey = arcKey(clanId, mentioned.getId());
-				if ((mentioned.getPersona() == null) || _arcs.containsKey(pairKey) || pairAtRest(clanId, mentioned.getId()) || dramaFocusHolds(System.currentTimeMillis(), pairKey))
+				if ((mentioned.getId() == clanId) || (mentioned.getPersona() == null) || _arcs.containsKey(pairKey) || pairAtRest(clanId, mentioned.getId()) || dramaFocusHolds(System.currentTimeMillis(), pairKey))
 				{
-					continue; // persona-less, already running, at rest, or another quarrel holds the stage
+					continue; // its own clan ("VS's camping" by a VioletSpider member, playtest 2026-10-21), persona-less, already running, at rest, or another quarrel holds the stage
 				}
 				final String cause = (_pairCauses.containsKey(pairKey)) ? _pairCauses.get(pairKey) : chooseCause(profile, mentioned);
 				_arcs.putIfAbsent(pairKey, new DramaArc(1, cause));
@@ -1338,6 +1378,7 @@ final class DramaEngine
 			// Remembered by BOTH sides: later quarrels may reference this
 			// shared history, and the helped clan owes a thanks now.
 			_goodDeeds.put(arcKey(clanId, otherClanId), Long.valueOf(now));
+			_kindnessBy.put(Integer.valueOf(clanId), new long[] { otherClanId, now }); // who helped whom (Phase 3)
 			if (other != null)
 			{
 				final int rank = rollBeatRank(0);
@@ -1594,7 +1635,7 @@ final class DramaEngine
 	 * clan membership, temperament, and what this message is for.
 	 */
 	/** World law enforced on every spoken line: Interlude-only lore, no cross-game borrowings. */
-	private static final String WORLD_LAW = "WORLD LAW: this is Lineage 2, Interlude. Speak ONLY of things that exist in that game and era - places like Talking Island, Gludio, Dion, Giran, Oren, Aden, Hunters Village, Cruma Tower, Enchanted Valley, Forest of Mirrors; creatures like wolves, gremlins, orcs, ant soldiers, golems, wyverns, Striders, spiritual eyes; coin is adena; gear grades are D, C, B, A and S only. NOTHING else exists: no places, monsters, items or grades from other games, and no inventions of your own - Ragnarok, World of Warcraft style fakes, 'P grade', 'G grade' - none of that is real here. If you are not sure something exists in Lineage 2, keep the line vague instead of naming it. ";
+	private static final String WORLD_LAW = "WORLD LAW: this is Lineage 2, Interlude. Speak ONLY of things that exist in that game and era - places like Talking Island, Gludio, Dion, Giran, Oren, Aden, Hunters Village, Cruma Tower, Enchanted Valley, Forest of Mirrors; creatures like wolves, gremlins, orcs, ant soldiers, golems, wyverns, Striders, spiritual eyes; coin is adena; gear grades are D, C, B, A and S only. NOTHING else exists: no places, monsters, items or grades from other games, and no inventions of your own - Ragnarok, World of Warcraft style fakes, 'P grade', 'G grade' - none of that is real here. If you are not sure something exists in Lineage 2, keep the line vague instead of naming it. CLANS: a clan name (IvoryCrown, SunSpear, BloodRaven...) is a CLAN - a whole group of players - never one person: speak of a clan as 'they', 'them', 'those guys' or by its name, never 'he', 'she', 'him', 'her' or 'a guy'. ";
 
 	private static String brainPrompt(ClanProfile profile, MessageKind kind, ClanProfile other, List<String> recent, String cause, boolean kindnessHistory, String situationOverride, String readingNote)
 	{
@@ -1706,8 +1747,42 @@ final class DramaEngine
 			announce("[RECORD] could not read " + file.getName() + " (" + e + ") - starting with no history.");
 			return;
 		}
+		_grievances.clear();
 		for (String key : props.stringPropertyNames())
 		{
+			if (key.startsWith("grievance."))
+			{
+				// Grievances share the file; older versions skip these lines
+				// (they don't have the 9 record fields).
+				try
+				{
+					final String[] g = props.getProperty(key, "").split("\\|", -1);
+					if (key.equals("grievance.~clock"))
+					{
+						_grievanceClock = Long.parseLong(g[0]);
+					}
+					else if (key.startsWith("grievance.war."))
+					{
+						if ("1".equals(g[0]))
+						{
+							_warDue.add(key.substring("grievance.war.".length()));
+						}
+					}
+					else
+					{
+						final int count = Integer.parseInt(g[0]);
+						if (count > 0)
+						{
+							_grievances.put(key.substring("grievance.".length()), Integer.valueOf(count));
+						}
+					}
+				}
+				catch (Exception e)
+				{
+					// a bad grievance line is simply dropped
+				}
+				continue;
+			}
 			final String[] f = props.getProperty(key, "").split("\\|", -1);
 			if (f.length < 9)
 			{
@@ -1732,7 +1807,7 @@ final class DramaEngine
 				// one bad line costs only that pair's history
 			}
 		}
-		announce("[RECORD] loaded " + _records.size() + " clan pair record(s) from " + file.getName() + ".");
+		announce("[RECORD] loaded " + _records.size() + " clan pair record(s) from " + file.getName() + (_grievances.isEmpty() ? "" : (", and " + _grievances.size() + " alliance grievance(s): " + grievanceText())) + (_warDue.isEmpty() ? "" : (" - an alliance war is due: " + String.join(", ", _warDue))) + ".");
 	}
 
 	private void saveRecords()
@@ -1750,6 +1825,15 @@ final class DramaEngine
 				final PairRecord r = e.getValue();
 				props.setProperty(e.getKey(), r.winsLow + "|" + r.winsHigh + "|" + r.draws + "|" + r.lastWinner + "|" + r.lastDuelAt + "|" + clean(r.lastDuelTown) + "|" + clean(r.lastEnding) + "|" + r.lastEndingAt + "|" + clean(r.lastCause));
 			}
+			for (Map.Entry<String, Integer> g : _grievances.entrySet())
+			{
+				props.setProperty("grievance." + g.getKey(), String.valueOf(g.getValue()));
+			}
+			for (String due : _warDue)
+			{
+				props.setProperty("grievance.war." + due, "1");
+			}
+			props.setProperty("grievance.~clock", String.valueOf(_grievanceClock));
 			final File tmp = new File(file.getPath() + ".tmp");
 			try (OutputStreamWriter out = new OutputStreamWriter(new FileOutputStream(tmp), StandardCharsets.UTF_8))
 			{
@@ -1770,6 +1854,190 @@ final class DramaEngine
 				announce("[RECORD] could not finish writing " + file.getName() + ".");
 			}
 		}
+	}
+
+	/** The side a clan stands on in an alliance war: its alliance, or itself when it has none. */
+	private String allianceKeyOf(ClanProfile profile)
+	{
+		if (profile.getAllianceGroup() > 0)
+		{
+			final String name = _allianceNames.get(Integer.valueOf(profile.getAllianceGroup()));
+			return ((name != null) && !name.isEmpty()) ? name : ("Alliance" + profile.getAllianceGroup());
+		}
+		return (profile.getName() != null) ? profile.getName() : ("Clan" + profile.getId());
+	}
+
+	/** "A+B" sorted, or null when both stand on the same side. */
+	private String grievanceKey(ClanProfile a, ClanProfile b)
+	{
+		if ((a == null) || (b == null))
+		{
+			return null;
+		}
+		final String ka = allianceKeyOf(a);
+		final String kb = allianceKeyOf(b);
+		if (ka.equals(kb))
+		{
+			return null; // same alliance: kept out on purpose (user, 2026-10-21)
+		}
+		return (ka.compareTo(kb) < 0) ? (ka + "+" + kb) : (kb + "+" + ka);
+	}
+
+	int grievanceCount(ClanProfile a, ClanProfile b)
+	{
+		final String key = grievanceKey(a, b);
+		final Integer count = (key != null) ? _grievances.get(key) : null;
+		return (count != null) ? count.intValue() : 0;
+	}
+
+	/** Epic chance for a duel between these clans: base + step per grievance, capped. */
+	int epicChanceFor(ClanProfile a, ClanProfile b)
+	{
+		if (!_allianceWars)
+		{
+			return _epicChance;
+		}
+		return Math.min(Math.max(_epicChance, _epicChanceCap), _epicChance + (_grievanceStep * grievanceCount(a, b)));
+	}
+
+	/**
+	 * A quarrel between two alliances ended with nothing settled - no peace,
+	 * no steel. The grudge grows; at AllianceWarAt the next quarrel between
+	 * them drags both alliances in and ends in an EPIC battle.
+	 */
+	private void addGrievance(ClanProfile a, ClanProfile b, String why)
+	{
+		if (!_allianceWars)
+		{
+			return;
+		}
+		final String key = grievanceKey(a, b);
+		if (key == null)
+		{
+			return;
+		}
+		final int count = _grievances.merge(key, Integer.valueOf(1), (x, y) -> Integer.valueOf(x.intValue() + y.intValue())).intValue();
+		if (_infoHook != null)
+		{
+			_infoHook.accept("clan-personalities: [GRIEVANCE] " + key.replace("+", " vs ") + ": " + count + " (" + clanNameOf(a) + " and " + clanNameOf(b) + " - " + why + "); epic chance between them now " + epicChanceFor(a, b) + "%" + ((count >= _allianceWarAt) ? " - an ALLIANCE WAR is brewing: their next quarrel drags both alliances in." : "."));
+		}
+		saveRecords();
+	}
+
+	/** Play-time housekeeping: stale war cries turn into grievances, and grievances fade. */
+	private void grievanceTick(long now)
+	{
+		final long last = _grievanceLastTick;
+		_grievanceLastTick = now;
+		if ((last > 0) && ((now - last) < 600000L))
+		{
+			_grievanceClock += (now - last);
+		}
+		for (Map.Entry<String, Long> e : _pendingWarCries.entrySet())
+		{
+			if (now >= e.getValue().longValue())
+			{
+				_pendingWarCries.remove(e.getKey());
+				final String[] ids = e.getKey().split("-");
+				try
+				{
+					addGrievance(_profiles.get(Integer.valueOf(Integer.parseInt(ids[0]))), _profiles.get(Integer.valueOf(Integer.parseInt(ids[1]))), "a war cry nobody answered with steel");
+				}
+				catch (Exception ex)
+				{
+					// a pair we can't read just drops
+				}
+			}
+		}
+		if ((_grievanceClock >= _grievanceFadeMillis) && (_grievanceFadeMillis > 0))
+		{
+			_grievanceClock -= _grievanceFadeMillis;
+			boolean changed = false;
+			for (Map.Entry<String, Integer> g : _grievances.entrySet())
+			{
+				final int next = g.getValue().intValue() - 1;
+				if (next <= 0)
+				{
+					_grievances.remove(g.getKey());
+				}
+				else
+				{
+					g.setValue(Integer.valueOf(next));
+				}
+				changed = true;
+			}
+			if (changed)
+			{
+				if (_infoHook != null)
+				{
+					_infoHook.accept("clan-personalities: [GRIEVANCE] time cools tempers - every grievance fades by one" + (_grievances.isEmpty() ? " (none left)." : (": " + grievanceText() + ".")));
+				}
+				saveRecords();
+			}
+		}
+	}
+
+	/** "DragonPact vs PhoenixOrder 3, ..." for logs and .clanp. */
+	String grievanceText()
+	{
+		final List<String> parts = new ArrayList<>();
+		for (Map.Entry<String, Integer> g : _grievances.entrySet())
+		{
+			parts.add(g.getKey().replace("+", " vs ") + " " + g.getValue() + (_warDue.contains(g.getKey()) ? " (WAR DUE)" : ""));
+		}
+		for (String due : _warDue)
+		{
+			if (!_grievances.containsKey(due))
+			{
+				parts.add(due.replace("+", " vs ") + " (WAR DUE)");
+			}
+		}
+		return parts.isEmpty() ? "none" : String.join(", ", parts);
+	}
+
+	/** Test command: set the grievance between two clans' sides. */
+	String setGrievance(ClanProfile a, ClanProfile b, int count)
+	{
+		final String key = grievanceKey(a, b);
+		if (key == null)
+		{
+			return null;
+		}
+		if (count <= 0)
+		{
+			_grievances.remove(key);
+		}
+		else
+		{
+			_grievances.put(key, Integer.valueOf(count));
+		}
+		saveRecords();
+		return key.replace("+", " vs ");
+	}
+
+	int allianceWarAt()
+	{
+		return _allianceWarAt;
+	}
+
+	void setAllianceWars(boolean enabled)
+	{
+		_allianceWars = enabled;
+	}
+
+	boolean allianceWarsOn()
+	{
+		return _allianceWars;
+	}
+
+	void setGrievanceRules(int step, int cap, int warAt, int fadeHours, int warCryMinutes, int allyLines)
+	{
+		_grievanceStep = Math.max(0, Math.min(50, step));
+		_epicChanceCap = Math.max(0, Math.min(100, cap));
+		_allianceWarAt = Math.max(1, Math.min(50, warAt));
+		_grievanceFadeMillis = Math.max(0, Math.min(72, fadeHours)) * 3600000L;
+		_warCryWindowMillis = Math.max(1, Math.min(240, warCryMinutes)) * 60000L;
+		_warAllyLines = Math.max(0, Math.min(8, allyLines));
 	}
 
 	private static String clean(String text)
@@ -2939,7 +3207,7 @@ final class DramaEngine
 	 * Towns are tried one after another until one offers a clean piste.
 	 * Returns null only when no town in the whole world does.
 	 */
-	private FieldArena fieldArena(int aggroX, int aggroY, int aggroZ, int rivalX, int rivalY, int rivalZ)
+	private FieldArena fieldArena(int aggroX, int aggroY, int aggroZ, int rivalX, int rivalY, int rivalZ, double avgLevel, int minLevel)
 	{
 		final int midX = (aggroX + rivalX) / 2;
 		final int midY = (aggroY + rivalY) / 2;
@@ -2973,6 +3241,7 @@ final class DramaEngine
 		final List<Npc> keepers = new ArrayList<>();
 		final List<Guard> guards = new ArrayList<>();
 		final List<WorldObject> aggro = new ArrayList<>();
+		final List<Monster> wild = new ArrayList<>();
 		for (WorldObject object : World.getInstance().getVisibleObjects())
 		{
 			if (object instanceof Guard)
@@ -2981,9 +3250,18 @@ final class DramaEngine
 			}
 			else if (object instanceof Monster)
 			{
-				if (((Monster) object).isAggressive() && !((Monster) object).isDead())
+				final Monster monster = (Monster) object;
+				if (monster.isDead())
+				{
+					continue;
+				}
+				if (monster.isAggressive())
 				{
 					aggro.add(object);
+				}
+				if (!monster.isRaid() && !monster.isMinion())
+				{
+					wild.add(monster); // raid bosses stay home; the wildlife roams
 				}
 			}
 			else if (object instanceof Npc)
@@ -2999,8 +3277,6 @@ final class DramaEngine
 		final List<TownZone> candidates = new ArrayList<>();
 		final Map<TownZone, Double> distances = new LinkedHashMap<>();
 		final Map<TownZone, Boolean> teleport = new LinkedHashMap<>();
-		TownZone giran = null;
-		double giranDistance = Double.MAX_VALUE;
 		for (TownZone zone : zones)
 		{
 			final Location center = zone.getZone().getCenterPoint();
@@ -3023,12 +3299,6 @@ final class DramaEngine
 			candidates.add(zone);
 			distances.put(zone, Double.valueOf(distance));
 			teleport.put(zone, Boolean.valueOf(hasKeeper));
-			final String name = zone.getName();
-			if (!watching.contains(zone) && (name != null) && name.toLowerCase().contains("giran") && (distance < giranDistance))
-			{
-				giranDistance = distance;
-				giran = zone;
-			}
 		}
 		if (candidates.isEmpty())
 		{
@@ -3038,14 +3308,32 @@ final class DramaEngine
 			}
 			return null;
 		}
-		// Order: Giran (when in reach) -> unwatched teleport towns by
-		// distance -> unwatched other towns -> watched towns last (better a
-		// doorstep fight than none at all).
-		final TownZone giranFirst = ((giran != null) && (giranDistance < 15000)) ? giran : null;
+		// Order (user, 2026-10-21): a town whose level band PREFERS this
+		// duel -> a town whose band accepts it -> towns with no band (the
+		// monster scan judges them) -> the wildcard starting villages;
+		// teleport towns before the rest inside each step, nearest first;
+		// watched towns after every unwatched one. A town whose band does
+		// not fit the duel is never used.
+		final Map<TownZone, Integer> bandRank = new LinkedHashMap<>();
+		for (Iterator<TownZone> it = candidates.iterator(); it.hasNext();)
+		{
+			final TownZone zone = it.next();
+			final int rank = bandRank(zone, avgLevel);
+			if (rank < 0)
+			{
+				it.remove();
+				continue;
+			}
+			bandRank.put(zone, Integer.valueOf(rank));
+		}
+		if (_infoHook != null)
+		{
+			_infoHook.accept("clan-personalities: [FIELD-SCAN] duel level: average " + Math.round(avgLevel) + ", lowest fighter " + minLevel + " - " + candidates.size() + " town(s) fit.");
+		}
 		candidates.sort((a, b) ->
 		{
-			final int ra = townRank(a, giranFirst, watching, teleport);
-			final int rb = townRank(b, giranFirst, watching, teleport);
+			final int ra = townRank(a, bandRank.get(a).intValue(), watching, teleport);
+			final int rb = townRank(b, bandRank.get(b).intValue(), watching, teleport);
 			if (ra != rb)
 			{
 				return Integer.compare(ra, rb);
@@ -3065,8 +3353,8 @@ final class DramaEngine
 			{
 				_infoHook.accept("clan-personalities: [FIELD-SCAN] every clean town was tried - falling back to watched " + chosen.getName() + ".");
 			}
-			final int[] tally = new int[6]; // probes, town, water, unwalkable, guard, monster
-			final FieldArena arena = siteArena(chosen, zones, waters, keepers, guards, aggro, tally);
+			final int[] tally = new int[9]; // probes, town, water, unwalkable, guard, monster, blocked spot, cliff edge, wildlife too strong
+			final FieldArena arena = siteArena(chosen, zones, waters, keepers, guards, aggro, wild, minLevel, tally);
 			if (arena != null)
 			{
 				if ((tried > 1) && (_infoHook != null))
@@ -3077,7 +3365,7 @@ final class DramaEngine
 			}
 			if (_infoHook != null)
 			{
-				_infoHook.accept("clan-personalities: [FIELD-SCAN] no clean piste at " + chosen.getName() + (Boolean.TRUE.equals(teleport.get(chosen)) ? "" : " (no Gatekeeper)") + ": " + tally[0] + " spots probed - " + tally[1] + " inside a town, " + tally[2] + " wet, " + tally[3] + " unwalkable, " + tally[4] + " near a guard (<" + _guardClearRadius + "), " + tally[5] + " near an aggressive monster (<" + _monsterClearRadius + ").");
+				_infoHook.accept("clan-personalities: [FIELD-SCAN] no clean piste at " + chosen.getName() + (Boolean.TRUE.equals(teleport.get(chosen)) ? "" : " (no Gatekeeper)") + ": " + tally[0] + " spots probed - " + tally[1] + " inside a town, " + tally[2] + " wet or by the sea, " + tally[3] + " unwalkable, " + tally[4] + " near a guard (<" + _guardClearRadius + "), " + tally[5] + " near an aggressive monster (<" + _monsterClearRadius + ")" + ((tally[6] > 0) ? (", " + tally[6] + " inside an ArenaBlockedSpots circle") : "") + ((tally[7] > 0) ? (", " + tally[7] + " at a cliff edge") : "") + ((tally[8] > 0) ? (", " + tally[8] + " with wildlife over level " + (minLevel + _wildLevelGap) + " around") : "") + ".");
 			}
 		}
 		if (_infoHook != null)
@@ -3087,12 +3375,13 @@ final class DramaEngine
 		return null;
 	}
 
-	/** Town order for arena siting: 0 Giran-in-reach, 1 teleport town,
-	 *  2 other town, +3 for any town a watcher stands in. */
-	private static int townRank(TownZone zone, TownZone giranFirst, Set<TownZone> watching, Map<TownZone, Boolean> teleport)
+	/** Town order for arena siting: the band step (0 prefer, 1 accept,
+	 *  2 no band, 3 wildcard) twice over - teleport towns first inside a
+	 *  step - and +8 for any town a watcher stands in. */
+	private static int townRank(TownZone zone, int band, Set<TownZone> watching, Map<TownZone, Boolean> teleport)
 	{
-		final int base = (zone == giranFirst) ? 0 : (Boolean.TRUE.equals(teleport.get(zone)) ? 1 : 2);
-		return watching.contains(zone) ? (base + 3) : base;
+		final int base = (band * 2) + (Boolean.TRUE.equals(teleport.get(zone)) ? 0 : 1);
+		return watching.contains(zone) ? (base + 8) : base;
 	}
 
 	/** Closest distance from a point to any object of a short list; MAX when empty. */
@@ -3117,9 +3406,9 @@ final class DramaEngine
 	 * tally (2 water, 4 guard, 5 monster). Both fighter spots (the point and
 	 * its side offset) must be clean.
 	 */
-	private int pisteVeto(Collection<WaterZone> waters, List<Guard> guards, List<WorldObject> aggro, int x, int y, int z, int sx, int sy)
+	private int pisteVeto(Collection<WaterZone> waters, List<Guard> guards, List<WorldObject> aggro, List<Monster> wild, int minLevel, int x, int y, int z, int sx, int sy)
 	{
-		if (waterAt(waters, x, y, z) || waterAt(waters, x + sx, y + sy, z))
+		if (waterAt(waters, x, y, z) || waterAt(waters, x + sx, y + sy, z) || seaNear(x, y, z) || seaNear(x + sx, y + sy, z))
 		{
 			return 2;
 		}
@@ -3131,6 +3420,14 @@ final class DramaEngine
 		{
 			return 5;
 		}
+		if (cliffNear(x, y, z) || cliffNear(x + sx, y + sy, z))
+		{
+			return 7;
+		}
+		if (wildTooStrong(wild, x, y, minLevel))
+		{
+			return 8;
+		}
 		return 0;
 	}
 
@@ -3140,12 +3437,24 @@ final class DramaEngine
 	 * standing right on the piste spoils it (GuardClearRadius, small), while
 	 * aggressive monsters keep their own, wider clearance (MonsterClearRadius).
 	 */
-	private FieldArena siteArena(TownZone chosen, Collection<TownZone> zones, Collection<WaterZone> waters, List<Npc> keepers, List<Guard> guards, List<WorldObject> aggro, int[] tally)
+	private FieldArena siteArena(TownZone chosen, Collection<TownZone> zones, Collection<WaterZone> waters, List<Npc> keepers, List<Guard> guards, List<WorldObject> aggro, List<Monster> allWild, int minLevel, int[] tally)
 	{
 		final Location center = chosen.getZone().getCenterPoint();
 		if (center == null)
 		{
 			return null;
+		}
+		// Only this town's surroundings matter to the wildlife scan.
+		final List<Monster> wild = new ArrayList<>();
+		final long reach = 9000L + _wildScanRadius;
+		for (Monster monster : allWild)
+		{
+			final long mdx = monster.getX() - center.getX();
+			final long mdy = monster.getY() - center.getY();
+			if (((mdx * mdx) + (mdy * mdy)) <= (reach * reach))
+			{
+				wild.add(monster);
+			}
 		}
 		// The heralds' meeting point FIRST: right beside the town's
 		// Gatekeeper - the very spot a teleporting player lands. The
@@ -3229,6 +3538,11 @@ final class DramaEngine
 						continue;
 					}
 					keptDoors.add(door);
+					if (arenaBlocked(door.getX(), door.getY()))
+					{
+						tally[6]++;
+						continue; // this road mouth leads somewhere fighters fall (ArenaBlockedSpots)
+					}
 					final double outX = door.getX() - center.getX();
 					final double outY = door.getY() - center.getY();
 					final double outLen = Math.sqrt((outX * outX) + (outY * outY));
@@ -3263,10 +3577,15 @@ final class DramaEngine
 							continue;
 						}
 						final int tryZ = GeoEngine.getInstance().getSpawnHeight(tryX, tryY, door.getZ());
-						final int veto = pisteVeto(waters, guards, aggro, tryX, tryY, tryZ, (int) (sideX * 260), (int) (sideY * 260));
+						final int veto = pisteVeto(waters, guards, aggro, wild, minLevel, tryX, tryY, tryZ, (int) (sideX * 260), (int) (sideY * 260));
 						if (veto != 0)
 						{
 							tally[veto]++;
+							continue;
+						}
+						if (arenaBlocked(tryX, tryY))
+						{
+							tally[6]++;
 							continue;
 						}
 						final boolean outWalk = GeoEngine.getInstance().canMoveToTarget(new Location(door.getX(), door.getY(), door.getZ()), new Location(tryX, tryY, tryZ));
@@ -3347,10 +3666,15 @@ final class DramaEngine
 					continue;
 				}
 				final int tryZ = GeoEngine.getInstance().getSpawnHeight(tryX, tryY, guideZ);
-				final int veto = pisteVeto(waters, guards, aggro, tryX, tryY, tryZ, (int) (sideX * 260), (int) (sideY * 260));
+				final int veto = pisteVeto(waters, guards, aggro, wild, minLevel, tryX, tryY, tryZ, (int) (sideX * 260), (int) (sideY * 260));
 				if (veto != 0)
 				{
 					tally[veto]++;
+					continue;
+				}
+				if (arenaBlocked(tryX, tryY))
+				{
+					tally[6]++;
 					continue;
 				}
 				if (!GeoEngine.getInstance().canMoveToTarget(new Location(guideX, guideY, guideZ), new Location(tryX, tryY, tryZ)))
@@ -3717,6 +4041,10 @@ final class DramaEngine
 				{
 					continue;
 				}
+				if (accuseSulking(aggressor.getId()) || accuseSulking(rival.getId()))
+				{
+					continue; // a clan caught being nice is not picking fights right now
+				}
 				if (otherAllianceBrewing && aggressor.isAlliedWith(rival))
 				{
 					continue; // a rival of another banner is ready: brothers wait
@@ -3948,7 +4276,7 @@ final class DramaEngine
 			final int lb = sortedB.get(i).getFakePlayerAppearance().getLevel();
 			final int ga = appearancePower(sortedA.get(i).getFakePlayerAppearance());
 			final int gb = appearancePower(sortedB.get(i).getFakePlayerAppearance());
-			if ((Math.abs(la - lb) > _maxLevelGap) || (Math.abs(ga - gb) > _maxGearGap))
+			if ((Math.abs(la - lb) > _maxLevelGap) || gearUnfair(ga, gb))
 			{
 				break; // this pairing would be a slaughter: the squad stops here
 			}
@@ -3956,6 +4284,109 @@ final class DramaEngine
 			outB.add(sortedB.get(i));
 		}
 		return target;
+	}
+
+	/**
+	 * Team-fair squads of exactly k: the k members of each clan closest to
+	 * the common level (gear breaks ties), accepted whole or not at all -
+	 * every pair within MaxLevelGap, and the two squads' AVERAGE gear fair
+	 * by the same gear rule a pair uses. Returns the common level.
+	 */
+	private int pickTeamSquads(List<Npc> poolA, List<Npc> poolB, int k, int power, List<Npc> outA, List<Npc> outB)
+	{
+		if ((poolA.size() < k) || (poolB.size() < k))
+		{
+			return 0;
+		}
+		final Set<Integer> levels = new LinkedHashSet<>();
+		for (Npc member : poolA)
+		{
+			levels.add(Integer.valueOf(member.getFakePlayerAppearance().getLevel()));
+		}
+		for (Npc member : poolB)
+		{
+			levels.add(Integer.valueOf(member.getFakePlayerAppearance().getLevel()));
+		}
+		for (Integer level : levels)
+		{
+			final int target = level.intValue();
+			final List<Npc> sortedA = new ArrayList<>(poolA);
+			final List<Npc> sortedB = new ArrayList<>(poolB);
+			Collections.shuffle(sortedA);
+			Collections.shuffle(sortedB);
+			sortedA.sort((a, b) -> Integer.compare(fitScore(a, target, power), fitScore(b, target, power)));
+			sortedB.sort((a, b) -> Integer.compare(fitScore(a, target, power), fitScore(b, target, power)));
+			final List<Npc> squadA = sortedA.subList(0, k);
+			final List<Npc> squadB = sortedB.subList(0, k);
+			boolean levelsOk = true;
+			for (int i = 0; i < k; i++)
+			{
+				if (Math.abs(squadA.get(i).getFakePlayerAppearance().getLevel() - squadB.get(i).getFakePlayerAppearance().getLevel()) > _maxLevelGap)
+				{
+					levelsOk = false;
+					break;
+				}
+			}
+			if (levelsOk && !gearUnfair((int) Math.round(teamGearValue(squadA)), (int) Math.round(teamGearValue(squadB))))
+			{
+				outA.addAll(squadA);
+				outB.addAll(squadB);
+				return target;
+			}
+		}
+		return 0;
+	}
+
+	private static double teamGearValue(List<Npc> squad)
+	{
+		double sum = 0;
+		for (Npc member : squad)
+		{
+			sum += appearancePower(member.getFakePlayerAppearance());
+		}
+		return squad.isEmpty() ? 0 : (sum / squad.size());
+	}
+
+	private static String teamGear(List<Npc> squad)
+	{
+		return String.valueOf(Math.round(teamGearValue(squad) * 10) / 10.0);
+	}
+
+	/**
+	 * Gear fairness (playtest 2026-10-21: a level 36 mage in all no-grade,
+	 * score 0, met a dagger with D-grade pieces, score 4 - inside the old
+	 * gap of 6, and over in 14 seconds). The gap is MaxGearGap; and a "bare"
+	 * fighter (score at or below BareGearMax) only meets someone at most
+	 * one point above its own score.
+	 */
+	private boolean gearUnfair(int ga, int gb)
+	{
+		if (Math.abs(ga - gb) > _maxGearGap)
+		{
+			return true;
+		}
+		final int low = Math.min(ga, gb);
+		return (low <= _bareGearMax) && ((Math.max(ga, gb) - low) > 1);
+	}
+
+	private static String duelRole(Npc member)
+	{
+		try
+		{
+			return PhantomManager.roleForClass(member.getFakePlayerAppearance().getPlayerClass()).name();
+		}
+		catch (Exception e)
+		{
+			return "WARRIOR";
+		}
+	}
+
+	/** True when a 1v1 between these two is on the AvoidSoloMatchups list (either way round). */
+	private boolean lopsidedSolo(Npc a, Npc b)
+	{
+		final String ra = duelRole(a);
+		final String rb = duelRole(b);
+		return _avoidSolo.contains(ra + "-" + rb) || _avoidSolo.contains(rb + "-" + ra);
 	}
 
 	/**
@@ -4061,7 +4492,14 @@ final class DramaEngine
 		// The skirmish bank: the world holds only so many duels. After a
 		// brawl the roads clear for a while - and each fight makes the
 		// NEXT one wait longer, its charge growing with the squad size.
-		if (now < _nextSkirmishMillis)
+		final String warKey = grievanceKey(profileA, profileB);
+		// The war is due once the grudge is deep enough - whichever path
+		// brings the duel (playtest 2026-10-21: the brew-to-steel path staged
+		// a plain 1v1 mid-war, before the war cry, and the battle never came).
+		// Two Peaceful clans still don't start it.
+		final boolean bothPeacefulPair = (profileA.getPersona() == PersonaType.PEACEFUL) && (profileB.getPersona() == PersonaType.PEACEFUL);
+		final boolean warDue = _allianceWars && (warKey != null) && !bothPeacefulPair && (_warDue.contains(warKey) || (grievanceCount(profileA, profileB) >= _allianceWarAt));
+		if (!warDue && (now < _nextSkirmishMillis))
 		{
 			if (_infoHook != null)
 			{
@@ -4071,12 +4509,61 @@ final class DramaEngine
 		}
 		// Squad size: the world's mood picks 1v1, 2v2 or 3v3, limited by
 		// how many walkable members each clan has out there today.
-		final int requested = 1 + Rnd.get(3);
+		// Rarely, the bickering boils over into an EPIC battle (user,
+		// 2026-10-21): EpicDuelChance percent of stagings roll EpicSquadMin
+		// to EpicSquadMax a side instead of 1..FieldMaxSquad.
+		// Grievances between the two sides' alliances raise the odds; a due
+		// alliance war makes it certain.
+		final int epicChance = epicChanceFor(profileA, profileB);
+		final boolean epicRoll = warDue || ((epicChance > 0) && (Rnd.get(100) < epicChance));
+		final int requested = epicRoll ? (_epicMin + Rnd.get((_epicMax - _epicMin) + 1)) : (1 + Rnd.get(_fieldMaxSquad));
+		if (epicRoll && (_infoHook != null))
+		{
+			_infoHook.accept("clan-personalities: [FIELD-MATCH] " + (warDue ? "the ALLIANCE WAR breaks out" : ("the dice say EPIC (" + epicChance + "% chance)")) + ": " + clanNameOf(profileA) + " and " + clanNameOf(profileB) + " may field up to " + requested + " a side.");
+		}
 		final List<Npc> poolA = clanMembers(profileA);
 		final List<Npc> poolB = clanMembers(profileB);
 		if (poolA.isEmpty() || poolB.isEmpty())
 		{
 			return false;
+		}
+		// An EPIC battle between two alliances pulls from the whole alliance
+		// on each side (user, 2026-10-21). Clans of the same alliance, or
+		// clans with none, fight with their own members only.
+		final boolean alliancePools = _allianceWars && epicRoll && (warKey != null);
+		if (alliancePools)
+		{
+			final List<String> joinedA = new ArrayList<>();
+			final List<String> joinedB = new ArrayList<>();
+			for (ClanProfile profile : _profiles.values())
+			{
+				if ((profile == profileA) || (profile == profileB) || (profile.getPersona() == null))
+				{
+					continue;
+				}
+				if ((profileA.getAllianceGroup() > 0) && (profile.getAllianceGroup() == profileA.getAllianceGroup()))
+				{
+					final List<Npc> members = clanMembers(profile);
+					if (!members.isEmpty())
+					{
+						poolA.addAll(members);
+						joinedA.add(clanNameOf(profile));
+					}
+				}
+				else if ((profileB.getAllianceGroup() > 0) && (profile.getAllianceGroup() == profileB.getAllianceGroup()))
+				{
+					final List<Npc> members = clanMembers(profile);
+					if (!members.isEmpty())
+					{
+						poolB.addAll(members);
+						joinedB.add(clanNameOf(profile));
+					}
+				}
+			}
+			if (_infoHook != null)
+			{
+				_infoHook.accept("clan-personalities: [FIELD-MATCH] alliance pools: " + allianceKeyOf(profileA) + " (" + clanNameOf(profileA) + (joinedA.isEmpty() ? "" : (" + " + String.join(", ", joinedA))) + ") vs " + allianceKeyOf(profileB) + " (" + clanNameOf(profileB) + (joinedB.isEmpty() ? "" : (" + " + String.join(", ", joinedB))) + ").");
+			}
 		}
 		// The fight's common gear tier: the average loadout across BOTH
 		// clans' available members, so each squad converges on the middle.
@@ -4119,7 +4606,100 @@ final class DramaEngine
 				_infoHook.accept("clan-personalities: [FIELD-MATCH] a lone healer/buffer would be a dull 1v1 - re-matched from fighters who can duel alone" + (champsA.isEmpty() ? " (none fit)." : "."));
 			}
 		}
-		final int size = Math.min(requested, Math.min(champsA.size(), champsB.size()));
+		// A 1v1 that Interlude decides before it starts (a dagger on a lone
+		// mage): try again without the first role of the pair, then without
+		// the second; keep the original only if nothing else fits.
+		if ((Math.min(champsA.size(), champsB.size()) == 1) && !_avoidSolo.isEmpty() && lopsidedSolo(champsA.get(0), champsB.get(0)))
+		{
+			final String was = duelRole(champsA.get(0)) + " vs " + duelRole(champsB.get(0));
+			final List<Npc> keepA = new ArrayList<>(champsA);
+			final List<Npc> keepB = new ArrayList<>(champsB);
+			final int keepLevel = targetLevel;
+			boolean fixed = false;
+			for (int pass = 0; (pass < 2) && !fixed; pass++)
+			{
+				final String drop = (pass == 0) ? duelRole(keepA.get(0)) : duelRole(keepB.get(0));
+				final List<Npc> fa = new ArrayList<>();
+				final List<Npc> fb = new ArrayList<>();
+				for (Npc member : poolA)
+				{
+					if (!cannotDuelAlone(member) && !drop.equals(duelRole(member)))
+					{
+						fa.add(member);
+					}
+				}
+				for (Npc member : poolB)
+				{
+					if (!cannotDuelAlone(member) && !drop.equals(duelRole(member)))
+					{
+						fb.add(member);
+					}
+				}
+				champsA.clear();
+				champsB.clear();
+				if (!fa.isEmpty() && !fb.isEmpty())
+				{
+					targetLevel = pickFairSquads(fa, fb, 1, targetPower, champsA, champsB);
+				}
+				fixed = !champsA.isEmpty() && !champsB.isEmpty() && !lopsidedSolo(champsA.get(0), champsB.get(0));
+			}
+			if (!fixed)
+			{
+				champsA.clear();
+				champsA.addAll(keepA);
+				champsB.clear();
+				champsB.addAll(keepB);
+				targetLevel = keepLevel;
+			}
+			if (_infoHook != null)
+			{
+				_infoHook.accept("clan-personalities: [FIELD-MATCH] " + was + " is a lopsided 1v1 - " + (fixed ? ("re-matched: " + duelRole(champsA.get(0)) + " vs " + duelRole(champsB.get(0)) + ".") : "no other fair pair, so it stands."));
+			}
+		}
+		// No fair pair at all (user, 2026-10-21): bigger squads can still be
+		// fair as TEAMS - two mixed loadouts can balance where no single
+		// pair does. Try 2v2, then 3v3 (up to FieldMaxSquad): every pair
+		// still within MaxLevelGap, and the squads' average gear fair.
+		if (champsA.isEmpty() || champsB.isEmpty())
+		{
+			// Normal: smallest first (2v2, then 3v3). Epic: biggest first,
+			// down to 2v2 - a war shrinks before it is called off.
+			final List<Integer> sizes = new ArrayList<>();
+			if (epicRoll)
+			{
+				for (int k = requested; k >= 2; k--)
+				{
+					sizes.add(Integer.valueOf(k));
+				}
+			}
+			else
+			{
+				for (int k = 2; k <= Math.max(_fieldMaxSquad, requested); k++)
+				{
+					sizes.add(Integer.valueOf(k));
+				}
+			}
+			for (Integer kk : sizes)
+			{
+				if (!champsA.isEmpty() && !champsB.isEmpty())
+				{
+					break;
+				}
+				final int k = kk.intValue();
+				champsA.clear();
+				champsB.clear();
+				final int level = pickTeamSquads(poolA, poolB, k, targetPower, champsA, champsB);
+				if (!champsA.isEmpty() && !champsB.isEmpty())
+				{
+					targetLevel = level;
+					if (_infoHook != null)
+					{
+						_infoHook.accept("clan-personalities: [FIELD-MATCH] no fair pair-by-pair match - bumped to " + k + "v" + k + ": team gear " + teamGear(champsA) + " vs " + teamGear(champsB) + " on average.");
+					}
+				}
+			}
+		}
+		final int size = (champsA.size() > requested) ? Math.min(champsA.size(), champsB.size()) : Math.min(requested, Math.min(champsA.size(), champsB.size()));
 		if (size <= 0)
 		{
 			if (_infoHook != null)
@@ -4193,7 +4773,31 @@ final class DramaEngine
 		final FieldArena arena;
 		try
 		{
-			arena = fieldArena(champsA.get(0).getX(), champsA.get(0).getY(), champsA.get(0).getZ(), champsB.get(0).getX(), champsB.get(0).getY(), champsB.get(0).getZ());
+			// The duel's level (playtest 2026-10-21): the AVERAGE of every
+			// fighter picks the town band; the LOWEST fighter sets the
+			// monster scan - the weakest one is who the wildlife would eat.
+			int levelSum = 0;
+			int levelCount = 0;
+			int minLevel = Integer.MAX_VALUE;
+			final List<Npc> everyone = new ArrayList<>(champsA);
+			everyone.addAll(champsB);
+			if (reinforceSource != null)
+			{
+				everyone.add(reinforceSource);
+			}
+			for (Npc fighter : everyone)
+			{
+				// The APPEARANCE carries the member's real level; the NPC
+				// shell's own getLevel() is a template value (85 for every
+				// one - playtest 2026-10-21 sent a level 28 duel to Aden).
+				final FakePlayerAppearance ap = fighter.getFakePlayerAppearance();
+				final int level = (ap != null) ? ap.getLevel() : fighter.getLevel();
+				levelSum += level;
+				levelCount++;
+				minLevel = Math.min(minLevel, level);
+			}
+			final double avgLevel = (levelCount > 0) ? ((double) levelSum / levelCount) : 40;
+			arena = fieldArena(champsA.get(0).getX(), champsA.get(0).getY(), champsA.get(0).getZ(), champsB.get(0).getX(), champsB.get(0).getY(), champsB.get(0).getZ(), avgLevel, (minLevel == Integer.MAX_VALUE) ? 1 : minLevel);
 		}
 		catch (Exception e)
 		{
@@ -4210,7 +4814,7 @@ final class DramaEngine
 		final PhantomManager pm = PhantomManager.getInstance();
 		// Grand brawls (3v3+) take longer to start: a spectacle worth
 		// walking for deserves time to gather an audience.
-		final long leadMillis = _fieldLeadSeconds * 1000L * ((pairSize >= 3) ? 2 : 1);
+		final long leadMillis = _fieldLeadSeconds * 1000L * ((pairSize >= _epicMin) ? 3 : ((pairSize >= 3) ? 2 : 1));
 		final long maxMillis = _fightMaxSeconds * 1000L;
 		final long unlockAt = now + leadMillis + maxMillis + 120000L;
 		_clanFightLocks.put(Integer.valueOf(profileA.getId()), Long.valueOf(unlockAt));
@@ -4227,16 +4831,23 @@ final class DramaEngine
 			{
 				// Straight onto the field (the crowd is already gathering
 				// there): side A on the near mark, side B across the gap.
-				final int ax = arena.x + Rnd.get(161) - 80;
-				final int ay = arena.y + Rnd.get(161) - 80;
+				// Two facing lines: each fighter steps along the line by its
+				// place in the squad, so a big battle stands as two ranks
+				// instead of a pile (a 1v1 stands on the mark itself).
+				final double offLen = Math.max(1, Math.sqrt(((double) arena.offX * arena.offX) + ((double) arena.offY * arena.offY)));
+				final double lineX = -arena.offY / offLen;
+				final double lineY = arena.offX / offLen;
+				final double slot = (i - ((pairSize - 1) / 2.0)) * 70.0;
+				final int ax = arena.x + (int) (lineX * slot) + Rnd.get(41) - 20;
+				final int ay = arena.y + (int) (lineY * slot) + Rnd.get(41) - 20;
 				final Player fighter = pm.spawnPartyMemberAs(apsA.get(i), new Location(ax, ay, GeoEngine.getInstance().getSpawnHeight(ax, ay, arena.guideZ)), apsA.get(i).getLevel());
 				if (fighter == null)
 				{
 					throw new IllegalStateException("the pack refused a fighter spawn");
 				}
 				sideA.add(fighter);
-				final int bx = arena.x + arena.offX + Rnd.get(161) - 80;
-				final int by = arena.y + arena.offY + Rnd.get(161) - 80;
+				final int bx = arena.x + arena.offX + (int) (lineX * slot) + Rnd.get(41) - 20;
+				final int by = arena.y + arena.offY + (int) (lineY * slot) + Rnd.get(41) - 20;
 				final Player rival = pm.spawnPartyMemberAs(apsB.get(i), new Location(bx, by, GeoEngine.getInstance().getSpawnHeight(bx, by, arena.guideZ)), apsB.get(i).getLevel());
 				if (rival == null)
 				{
@@ -4245,20 +4856,24 @@ final class DramaEngine
 				sideB.add(rival);
 			}
 			// Wear the colors: the crests go on visibly, the world sees WHO.
-			final Clan clanA = ClanTable.getInstance().getClan(profileA.getId());
-			final Clan clanB = ClanTable.getInstance().getClan(profileB.getId());
-			if (clanA != null)
+			// Each fighter wears its OWN clan's crest - an alliance battle
+			// shows every clan that came.
+			for (int i = 0; i < sideA.size(); i++)
 			{
-				for (Player fighter : sideA)
+				final int own = (apsA.get(i).getClanId() > 0) ? apsA.get(i).getClanId() : profileA.getId();
+				final Clan clan = ClanTable.getInstance().getClan(own);
+				if (clan != null)
 				{
-					BotClanManager.getInstance().attach(fighter, clanA);
+					BotClanManager.getInstance().attach(sideA.get(i), clan);
 				}
 			}
-			if (clanB != null)
+			for (int i = 0; i < sideB.size(); i++)
 			{
-				for (Player fighter : sideB)
+				final int own = (apsB.get(i).getClanId() > 0) ? apsB.get(i).getClanId() : profileB.getId();
+				final Clan clan = ClanTable.getInstance().getClan(own);
+				if (clan != null)
 				{
-					BotClanManager.getInstance().attach(fighter, clanB);
+					BotClanManager.getInstance().attach(sideB.get(i), clan);
 				}
 			}
 			// The right steel for the class: a fighter whose skills want a
@@ -4313,10 +4928,11 @@ final class DramaEngine
 			_infoHook.accept("clan-personalities: [FIELD-FIGHT] alliance brothers: " + clanNameOf(profileA) + " and " + clanNameOf(profileB) + " are both " + ((fight.allianceName != null) ? fight.allianceName : "one alliance") + " - they fight anyway, and everyone notices.");
 		}
 		fight.loud = (pairSize >= 3);
+		fight.epic = (pairSize >= _epicMin);
 		// Ring the skirmish bank: this fight's size buys the world's
 		// quiet afterward - a 3v3 weighs twice a 1v1, and a hot day
 		// stretches every later wait one step further.
-		_skirmishHeat = Math.min(6, _skirmishHeat + pairSize);
+		_skirmishHeat = Math.min(fight.epic ? 12 : 6, _skirmishHeat + pairSize);
 		_nextSkirmishMillis = now + _skirmishCooldownMillis + (_skirmishHeat * _skirmishHeatStepMillis);
 		if (_skirmishHeatDecayAt == 0)
 		{
@@ -4332,6 +4948,56 @@ final class DramaEngine
 		if (_infoHook != null)
 		{
 			_infoHook.accept("clan-personalities: [FIELD-FIGHT] staged " + pairSize + "v" + pairSize + " outside " + arena.townName + " at " + arena.x + "," + arena.y + ": " + clanNameOf(profileA) + "'s " + String.join(", ", namesA) + " vs " + clanNameOf(profileB) + "'s " + String.join(", ", namesB) + " (" + fight.compassSide + " side; fists fly in ~" + (leadMillis / 1000) + "s, sooner once a watcher reaches the fence).");
+		}
+		// Who fights for which clan (an alliance battle mixes them).
+		final Set<Integer> alliedA = new LinkedHashSet<>();
+		final Set<Integer> alliedB = new LinkedHashSet<>();
+		for (int i = 0; i < Math.min(sideA.size(), apsA.size()); i++)
+		{
+			final int own = (apsA.get(i).getClanId() > 0) ? apsA.get(i).getClanId() : profileA.getId();
+			fight.fanClans.put(Integer.valueOf(sideA.get(i).getObjectId()), Integer.valueOf(own));
+			if (own != profileA.getId())
+			{
+				alliedA.add(Integer.valueOf(own));
+			}
+		}
+		for (int i = 0; i < Math.min(sideB.size(), apsB.size()); i++)
+		{
+			final int own = (apsB.get(i).getClanId() > 0) ? apsB.get(i).getClanId() : profileB.getId();
+			fight.fanClans.put(Integer.valueOf(sideB.get(i).getObjectId()), Integer.valueOf(own));
+			if (own != profileB.getId())
+			{
+				alliedB.add(Integer.valueOf(own));
+			}
+		}
+		fight.gated = townHasGates(arena.townName);
+		fight.allianceWar = alliancePools && (!alliedA.isEmpty() || !alliedB.isEmpty());
+		if (alliancePools)
+		{
+			fight.allianceA = allianceKeyOf(profileA);
+			fight.allianceB = allianceKeyOf(profileB);
+		}
+		// A war cry answered with steel is satisfied; an EPIC battle between
+		// two alliances settles the whole grudge.
+		_pendingWarCries.remove(arcKey(profileA.getId(), profileB.getId()));
+		if (fight.epic && (warKey != null))
+		{
+			final Integer had = _grievances.remove(warKey);
+			final boolean wasWar = _warDue.remove(warKey);
+			if (((had != null) || wasWar) && (_infoHook != null))
+			{
+				_infoHook.accept("clan-personalities: [GRIEVANCE] " + warKey.replace("+", " vs ") + ": the epic battle settles " + ((had != null) ? had.intValue() : 0) + " grievance(s)" + (wasWar ? " - the alliance war is fought." : "."));
+			}
+			saveRecords();
+		}
+		// Peaceful clans dragged into an alliance battle say so, out loud.
+		for (Integer allyId : alliedA)
+		{
+			draggedIn(fight, _profiles.get(allyId), profileA, profileB);
+		}
+		for (Integer allyId : alliedB)
+		{
+			draggedIn(fight, _profiles.get(allyId), profileB, profileA);
 		}
 		// The heartbeat starts at once: the crowd, the jabs and the fence
 		// all live inside it. (Before: the first tick waited out the whole
@@ -4350,6 +5016,17 @@ final class DramaEngine
 			ThreadPool.schedule(() -> fieldOpener(fight), 1500 + Rnd.get(2500));
 			ThreadPool.schedule(() -> fieldWhereLine(fight, false), 7000 + Rnd.get(4000));
 			ThreadPool.schedule(() -> fieldWhereLine(fight, false), Math.max(20000, leadMillis / 2) + Rnd.get(4000));
+			if (fight.epic)
+			{
+				// An EPIC battle is world news: a third clan spreads it, and
+				// the address goes out once more late in the long runway.
+				if (_infoHook != null)
+				{
+					_infoHook.accept("clan-personalities: [FIELD-EPIC] " + pairSize + "v" + pairSize + " - an EPIC battle: world news, a triple runway, extra calls.");
+				}
+				ThreadPool.schedule(() -> epicNews(fight), 12000 + Rnd.get(6000));
+				ThreadPool.schedule(() -> fieldWhereLine(fight, false), Math.max(40000, (leadMillis * 4) / 5) + Rnd.get(4000));
+			}
 			if (_fieldHeralds > 0)
 			{
 				ThreadPool.schedule(() -> scheduleHeralds(fight, arena), 3000 + Rnd.get(3000));
@@ -4366,6 +5043,119 @@ final class DramaEngine
 			ThreadPool.schedule(() -> fieldDuelCallout(fight, true), 2000 + Rnd.get(2000));
 		}
 		return true;
+	}
+
+	/**
+	 * A Peaceful clan pulled into an alliance battle complains in world
+	 * chat: it will fight for its alliance, but it never asked for this.
+	 */
+	private void draggedIn(FieldFight fight, ClanProfile ally, ClanProfile brother, ClanProfile foe)
+	{
+		if ((ally == null) || (ally.getPersona() != PersonaType.PEACEFUL))
+		{
+			return;
+		}
+		if (_infoHook != null)
+		{
+			_infoHook.accept("clan-personalities: [FIELD-DRAGGED] " + clanNameOf(ally) + " (Peaceful) is dragged into " + clanNameOf(brother) + "'s war with " + clanNameOf(foe) + ".");
+		}
+		ThreadPool.schedule(() ->
+		{
+			if (!fight.running)
+			{
+				return;
+			}
+			final VoiceChoice voice = chooseVoice(ally);
+			if (voice == null)
+			{
+				return;
+			}
+			brainWorld(voice.creature, "Your clan " + clanNameOf(ally) + " is Peaceful - but your alliance " + allianceKeyOf(ally) + " is going to war with " + allianceKeyOf(foe) + " over " + clanNameOf(brother) + "'s quarrel with " + clanNameOf(foe) + ", and some of your members are being dragged onto the field outside " + fight.townName + ". In ONE short line, complain about being dragged into this: you'll fight for your alliance, but you never wanted it.", "delivered [FIELD-DRAGGED]");
+		}, 9000 + Rnd.get(8000) + spacingHold());
+	}
+
+	/** Towns with no wall and so no gates (user, 2026-10-21: "north gate didn't really exist"). */
+	private final Set<String> _gatelessTowns = ConcurrentHashMap.newKeySet();
+
+	void setGatelessTowns(String spec)
+	{
+		_gatelessTowns.clear();
+		if (spec != null)
+		{
+			for (String raw : spec.split(","))
+			{
+				final String town = denseName(raw);
+				if (!town.isEmpty())
+				{
+					_gatelessTowns.add(town);
+				}
+			}
+		}
+	}
+
+	private boolean townHasGates(String townName)
+	{
+		return (townName == null) || !_gatelessTowns.contains(denseName(townName));
+	}
+
+	/** "the north gates of Giran" / "the north-east side of Talking Island". */
+	private static String sidePlace(FieldFight fight)
+	{
+		return "the " + fight.compassSide + (fight.gated ? " gates of " : " side of ") + fight.townName;
+	}
+
+	/** "outside the north gates of Giran" / "on the north-east side of Talking Island". */
+	private static String outsidePlace(FieldFight fight)
+	{
+		return fight.gated ? ("outside the " + fight.compassSide + " gates of " + fight.townName) : ("on the " + fight.compassSide + " side of " + fight.townName);
+	}
+
+	/** "outside the gates of Giran" / "outside Talking Island". */
+	private static String outsideTown(FieldFight fight)
+	{
+		return fight.gated ? ("outside the gates of " + fight.townName) : ("outside " + fight.townName);
+	}
+
+	/** One side of a fight, for announcements: an alliance at war, or a clan's fighters. */
+	private String sideLabel(FieldFight fight, boolean sideA)
+	{
+		if (fight.allianceWar)
+		{
+			final ClanProfile lead = _profiles.get(sideA ? fight.clanAId : fight.clanBId);
+			return "the " + (sideA ? fight.allianceA : fight.allianceB) + " alliance (led by " + ((lead != null) ? clanNameOf(lead) : "its clans") + ": " + String.join(", ", sideA ? fight.namesA : fight.namesB) + ")";
+		}
+		return sideA ? sideTag(fight.clanAId, fight.namesA) : sideTag(fight.clanBId, fight.namesB);
+	}
+
+	/**
+	 * EPIC battles only: a clan that is NOT fighting spreads the news in
+	 * world chat - the whole server hears that a war is about to break out.
+	 */
+	private void epicNews(FieldFight fight)
+	{
+		if (!fight.running)
+		{
+			return;
+		}
+		final List<ClanProfile> others = new ArrayList<>();
+		for (ClanProfile profile : _profiles.values())
+		{
+			if ((profile.getId() != fight.clanAId) && (profile.getId() != fight.clanBId) && (profile.getPersona() != null) && !(fight.allianceWar && (allianceKeyOf(profile).equals(fight.allianceA) || allianceKeyOf(profile).equals(fight.allianceB))))
+			{
+				others.add(profile);
+			}
+		}
+		Collections.shuffle(others);
+		for (ClanProfile crier : others)
+		{
+			final VoiceChoice voice = chooseVoice(crier);
+			if (voice == null)
+			{
+				continue;
+			}
+			brainWorld(voice.creature, "WORLD NEWS: an EPIC battle is about to break out - " + (fight.allianceWar ? "an ALLIANCE WAR, " : "") + sideLabel(fight, true) + " against " + sideLabel(fight, false) + ", " + fight.namesA.size() + " against " + fight.namesB.size() + ", " + outsidePlace(fight) + ". Your clan " + clanNameOf(crier) + " is NOT in it - you are spreading the word, amazed or excited. In ONE short line, tell the whole world: name both clans, the size of it, and where.", "delivered [FIELD-EPIC]");
+			return;
+		}
 	}
 
 	/**
@@ -4387,7 +5177,8 @@ final class DramaEngine
 		}
 		final ClanProfile voiceClan = _profiles.get(Integer.valueOf(((where instanceof Player) && fight.sideB.contains(where)) ? fight.clanBId : fight.clanAId));
 		final VoiceChoice choice = new VoiceChoice(where, 0, "", false);
-		final String moment = alreadyStarted ? "a REAL clan fight is underway RIGHT NOW" : "a REAL clan fight starts within the minute";
+		final String scale = fight.allianceWar ? ("an ALLIANCE WAR, " + fight.namesA.size() + " against " + fight.namesB.size() + " - " + fight.allianceA + " against " + fight.allianceB + ", the kind of battle people talk about for weeks") : (fight.epic ? ("an EPIC battle, " + fight.namesA.size() + " against " + fight.namesB.size() + " - a clan WAR on the field, the kind people talk about for weeks") : "a REAL clan fight");
+		final String moment = alreadyStarted ? (scale + " is underway RIGHT NOW") : (scale + " starts soon");
 		final String walk = walkWord(fight);
 		// The compose + address-check + retry flow runs whole on a brain
 		// worker; only the delivery hops back to the game pool.
@@ -4396,7 +5187,7 @@ final class DramaEngine
 		{
 			brainSubmit(() ->
 			{
-				String text = brainCustom(choice.creature, "WORLD NEWS, and you spread it loudly: " + moment + " - " + sideTag(battle.clanAId, battle.namesA) + " against " + sideTag(battle.clanBId, battle.namesB) + ". The place: " + walk + " the " + battle.compassSide + " gates of " + battle.townName + ". In ONE short line, TELL THE WORLD WHERE: name the town AND the side of its gates - and make clear how far the walk is (" + walk + ") - so people know where to teleport and which direction to head out. Make it findable, like world-chat gossip that wants an audience.");
+				String text = brainCustom(choice.creature, "WORLD NEWS, and you spread it loudly: " + moment + " - " + sideLabel(battle, true) + " against " + sideLabel(battle, false) + ". The place: " + walk + " " + sidePlace(battle) + ". In ONE short line, TELL THE WORLD WHERE: name the town AND the side of its gates - and make clear how far the walk is (" + walk + ") - so people know where to teleport and which direction to head out. Make it findable, like world-chat gossip that wants an audience.");
 				if (text == null)
 				{
 					return; // brain down: the opener still pointed the way
@@ -4406,7 +5197,7 @@ final class DramaEngine
 				// again, the bare address rides along with whatever was said.
 				if (!containsIgnoreCase(text, battle.compassSide) && !containsIgnoreCase(text, battle.townName))
 				{
-					final String retry = brainCustom(choice.creature, "No commentary - the ADDRESS. ONE short line that contains the words \"outside the " + battle.compassSide + " gates of " + battle.townName + "\", plus a pinch of gossip heat. The place must be findable.");
+					final String retry = brainCustom(choice.creature, "No commentary - the ADDRESS. ONE short line that contains the words \"" + outsidePlace(battle) + "\", plus a pinch of gossip heat. The place must be findable.");
 					if (retry == null)
 					{
 						return;
@@ -4414,7 +5205,7 @@ final class DramaEngine
 					text = retry;
 					if (!containsIgnoreCase(text, battle.compassSide) && !containsIgnoreCase(text, battle.townName))
 					{
-						text = text + " - " + walk + " the " + battle.compassSide + " gates of " + battle.townName + ", right now.";
+						text = text + " - " + walk + " " + sidePlace(battle) + ", right now.";
 					}
 				}
 				final String spoken = text;
@@ -4701,7 +5492,7 @@ final class DramaEngine
 		final String walk = walkWord(fight);
 		if (started)
 		{
-			role = "The clan fight just STARTED " + walk + " the " + fight.compassSide + " gates of " + fight.townName + ", and you are really loud about it right now.";
+			role = "The clan fight just STARTED " + walk + " " + sidePlace(fight) + ", and you are really loud about it right now.";
 			ask = "In ONE short line, call to whoever is near: it has begun - " + walk + " the " + fight.compassSide + " side out of " + fight.townName + " - come quick. No shouting.";
 		}
 		else if (wrongWay)
@@ -5451,10 +6242,13 @@ final class DramaEngine
 			return;
 		}
 		final boolean sideA = fight.sideA.contains(speaker);
-		final ClanProfile own = _profiles.get(sideA ? fight.clanAId : fight.clanBId);
+		final Integer ownId = fight.fanClans.get(Integer.valueOf(speaker.getObjectId()));
+		final ClanProfile own = _profiles.get((ownId != null) ? ownId : Integer.valueOf(sideA ? fight.clanAId : fight.clanBId));
+		final ClanProfile lead = _profiles.get(sideA ? fight.clanAId : fight.clanBId);
+		final String draggedNote = (fight.allianceWar && (own != null) && (own != lead) && (own.getPersona() == PersonaType.PEACEFUL)) ? (" Your clan is Peaceful and was dragged into " + ((lead != null) ? clanNameOf(lead) : "an ally") + "'s war - you fight, but you let them know you never wanted this.") : "";
 		final int level = fight.aggression;
 		final String mood = (level < 40) ? "Both sides are still sizing each other up." : ((level < 75) ? "Tempers are rising fast." : "One more word and somebody swings.");
-		brainSpeak(speaker, "You stand face to face with the rival clan, moments before the real clan fight at the " + fight.compassSide + " side of " + fight.townName + " begins. " + mood + " In ONE short line, taunt your rivals or egg the onlookers toward the start. This line is pure attitude - no directions needed. No shouting." + allianceNote(fight, false) + ((Rnd.get(100) < 35) ? historyTail(own, _profiles.get(sideA ? fight.clanBId : fight.clanAId)) : ""), "delivered [FIELD-TRASH]", false, t ->
+		brainSpeak(speaker, "You stand face to face with the rival clan, moments before the real clan fight at the " + fight.compassSide + " side of " + fight.townName + " begins. You fight for " + ((own != null) ? clanNameOf(own) : "your clan") + "; your rivals are " + (sideA ? sideTag(fight.clanBId, fight.namesB) : sideTag(fight.clanAId, fight.namesA)) + " - taunt THEM, never your own clan." + draggedNote + " " + mood + " In ONE short line, taunt your rivals or egg the onlookers toward the start. This line is pure attitude - no directions needed. No shouting." + allianceNote(fight, false) + ((Rnd.get(100) < 35) ? historyTail(own, _profiles.get(sideA ? fight.clanBId : fight.clanAId)) : ""), "delivered [FIELD-TRASH]", false, t ->
 		{
 			fight.spoke.add(speaker.getName());
 			int gain = _aggroMin + Rnd.get(Math.max(1, (_aggroMax - _aggroMin) + 1));
@@ -5648,7 +6442,7 @@ final class DramaEngine
 		final Player subject = fighters.get(Rnd.get(fighters.size()));
 		final String fact = fighterFact(fight, subject);
 		final boolean garble = Rnd.get(100) < 35;
-		brainSpeak(fan, "You stand in the crowd at a REAL clan fight outside " + fight.townName + ", chatting with the fan beside you about the fighters. The fact: " + fact + ". " + (garble ? "Gossip it slightly WRONG - exaggerate or misremember one detail, the way crowd talk does." : "Gossip it as you heard it.") + " ONE short line to the person next to you, naming " + subject.getName() + "." + allianceNote(fight, true), "delivered [CROWD-TALK]", false, t ->
+		brainSpeak(fan, "You stand in the crowd at a REAL clan fight outside " + fight.townName + ", chatting with the fan beside you about the fighters. " + matchupNote(fight, fan, false) + " The fact: " + fact + ". " + (garble ? "Gossip it slightly WRONG - exaggerate or misremember one detail, the way crowd talk does." : "Gossip it as you heard it.") + " ONE short line to the person next to you, naming " + subject.getName() + "." + allianceNote(fight, true), "delivered [CROWD-TALK]", false, t ->
 		{
 			if (Rnd.get(100) >= _fighterAnswerChance)
 			{
@@ -5913,7 +6707,7 @@ final class DramaEngine
 		{
 			return;
 		}
-		brainNear(fan, "You are in the crowd ringing a REAL clan duel at the " + fight.compassSide + " side of " + fight.townName + ". In ONE short line, react to the fight as it stands: an ooh, a cheer for one side, a jab at the side losing. No directions needed." + allianceNote(fight, true), "delivered [CROWD]");
+		brainNear(fan, "You are in the crowd ringing a REAL clan duel at the " + fight.compassSide + " side of " + fight.townName + ". " + matchupNote(fight, fan, true) + " In ONE short line, react to the fight as it stands: an ooh, a cheer for one side, a jab at the side losing. No directions needed." + allianceNote(fight, true), "delivered [CROWD]");
 	}
 
 	/** One sword keeps its face; the pack's playstyle engine adds casts. */
@@ -5946,8 +6740,11 @@ final class DramaEngine
 		if (support)
 		{
 			// Healers and buffers hold back with the staff: they swing only
-			// when out of mana or left standing alone on their side.
-			if ((attacker.getCurrentMpPercent() < 8) || (squadOf(fight, attacker).size() <= 1))
+			// when out of mana, left standing alone on their side, or when
+			// nobody on their side can fight (playtest 2026-10-21: a side of
+			// two healers only healed, and the duel ran out as a lopsided
+			// draw - one side dealt every blow).
+			if ((attacker.getCurrentMpPercent() < 8) || (squadOf(fight, attacker).size() <= 1) || !squadHasStriker(fight, attacker))
 			{
 				PhantomCombatActions.maintainAttack(attacker, defender);
 			}
@@ -5957,6 +6754,20 @@ final class DramaEngine
 		{
 			PhantomCombatActions.maintainAttack(attacker, defender);
 		}
+	}
+
+	/** True while someone living on this fighter's side is not a healer or buffer. */
+	private static boolean squadHasStriker(FieldFight fight, Player fighter)
+	{
+		for (Player mate : squadOf(fight, fighter))
+		{
+			final String role = playRole(mate);
+			if (!"HEALER".equals(role) && !"BUFFER".equals(role))
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/** The living fighters on the given fighter's own side. */
@@ -6329,6 +7140,36 @@ final class DramaEngine
 			{
 				cast = PhantomPlaystyleEngine.pickFallback(attacker, defender, state, 0);
 			}
+			// A mage OPENS with a nuke (playtest 2026-10-21: a nuker opened
+			// a 1v1 with Curse: Poison against a dagger and died in 14 s).
+			// Until its first damage spell has gone out, a non-damage pick
+			// is turned back and the engine asked again, a few times.
+			if ("NUKER".equals(role) && !fight.notedSkillNotes.contains("nuked:" + attacker.getName()))
+			{
+				for (int retry = 0; (retry < 4) && (cast != null) && (cast.skill != null) && !cast.skill.isDamage(); retry++)
+				{
+					final String skipped = cast.skill.getName();
+					PhantomPlaystyleEngine.markRejected(state, cast);
+					PhantomPlaystyleEngine.CastAction again = PhantomPlaystyleEngine.choose(attacker, defender, state, false, true, 0, role);
+					if ((again == null) || pvpUseless(again.skill))
+					{
+						again = PhantomPlaystyleEngine.pick(attacker, defender, state, false, true, 0, role);
+					}
+					if ((again != null) && (again.skill != null) && (_infoHook != null) && fight.notedSkillNotes.add("opener:" + attacker.getName()))
+					{
+						_infoHook.accept("clan-personalities: [SKILLS] " + attacker.getName() + " (NUKER) passes on " + skipped + " to open with damage.");
+					}
+					if (again == null)
+					{
+						break; // nothing else: keep the first pick
+					}
+					cast = again;
+				}
+				if ((cast != null) && (cast.skill != null) && cast.skill.isDamage())
+				{
+					fight.notedSkillNotes.add("nuked:" + attacker.getName());
+				}
+			}
 			if ((cast != null) && pvpUseless(cast.skill))
 			{
 				if (fight.notedSkillNotes.add("useless:" + attacker.getName() + ":" + cast.skill.getName()) && (_infoHook != null))
@@ -6542,6 +7383,64 @@ final class DramaEngine
 	}
 
 	/** Roster tag: "SunSpear's Elarion, Wyrlis and Gwenn" (clan up front). */
+	/**
+	 * Who is actually fighting, for crowd prompts (playtest 2026-10-21: with
+	 * no matchup in the prompt, fans credited a bystander clan standing in
+	 * the crowd - "ivorycrown's getting crushed" in a SunSpear vs
+	 * CrimsonPhoenix duel). Names both sides, the viewer's own place, and -
+	 * once fists fly - how each side is doing.
+	 */
+	private String matchupNote(FieldFight fight, Player viewer, boolean withHealth)
+	{
+		final ClanProfile a = _profiles.get(fight.clanAId);
+		final ClanProfile b = _profiles.get(fight.clanBId);
+		final String nameA = (a != null) ? clanNameOf(a) : "one clan";
+		final String nameB = (b != null) ? clanNameOf(b) : "the other clan";
+		final StringBuilder p = new StringBuilder();
+		p.append("THE FIGHT: ").append(sideLabel(fight, true)).append(" against ").append(sideLabel(fight, false)).append(fight.allianceWar ? " - two alliances at war; everyone else here is just watching." : " - only these two clans are fighting; every other clan here is just watching.");
+		// Spawned fans don't reliably carry their clan; the fight's own book does.
+		final Integer known = fight.fanClans.get(Integer.valueOf(viewer.getObjectId()));
+		final int viewerClan = (known != null) ? known.intValue() : viewer.getClanId();
+		if (fight.sideA.contains(viewer) || fight.sideB.contains(viewer))
+		{
+			final ClanProfile own = _profiles.get(viewerClan);
+			p.append(" You are one of the fighters, for ").append((own != null) ? clanNameOf(own) : "your clan").append(fight.allianceWar ? (" of the " + (fight.sideA.contains(viewer) ? fight.allianceA : fight.allianceB) + " alliance.") : ".");
+		}
+		else if (viewerClan == fight.clanAId)
+		{
+			p.append(" You are from ").append(nameA).append(", one of the two sides.");
+		}
+		else if (viewerClan == fight.clanBId)
+		{
+			p.append(" You are from ").append(nameB).append(", one of the two sides.");
+		}
+		else
+		{
+			final ClanProfile own = _profiles.get(viewerClan);
+			p.append(" You are ").append((own != null) ? ("from " + clanNameOf(own) + ", ") : "").append("an onlooker - your clan is NOT in this fight.");
+		}
+		if (withHealth && fight.running)
+		{
+			p.append(" Right now ").append(nameA).append(" is at ").append(sideHealth(fight.sideA)).append("% health and ").append(nameB).append(" at ").append(sideHealth(fight.sideB)).append("%.");
+		}
+		return p.toString();
+	}
+
+	private static int sideHealth(List<Player> side)
+	{
+		double hp = 0;
+		double max = 0;
+		for (Player fighter : side)
+		{
+			if (fighter.isOnline())
+			{
+				hp += Math.max(0, fighter.getCurrentHp());
+				max += fighter.getMaxHp();
+			}
+		}
+		return (max > 0) ? (int) Math.round((hp / max) * 100) : 0;
+	}
+
 	private String sideTag(int clanId, List<String> names)
 	{
 		final ClanProfile profile = _profiles.get(clanId);
@@ -6574,7 +7473,7 @@ final class DramaEngine
 			cause = chooseCause(profileA, profileB);
 		}
 		final String lead = (_fieldLeadSeconds > 0) ? " - fists fly in about a minute, so anyone who wants a seat should start walking" : " - happening right now";
-		final String prompt = "Your clan " + clanNameOf(profileA) + " has walked out of town to settle the beef with steel: " + sideTag(fight.clanAId, fight.namesA) + " against " + sideTag(fight.clanBId, fight.namesB) + ", just OUTSIDE the " + fight.compassSide + " gates of " + fight.townName + lead + ". ONE short hot line - announce the clash, name the place AND the side of town so people can actually find it, and taunt " + clanNameOf(profileB) + " over " + cause + "." + allianceNote(fight, false) + historyTail(profileA, profileB);
+		final String prompt = "Your clan " + clanNameOf(profileA) + " has walked out of town to settle the beef with steel: " + sideTag(fight.clanAId, fight.namesA) + " against " + sideTag(fight.clanBId, fight.namesB) + ", just " + outsidePlace(fight) + lead + ". ONE short hot line - announce the clash, name the place AND the side of town so people can actually find it, and taunt " + clanNameOf(profileB) + " over " + cause + "." + allianceNote(fight, false) + historyTail(profileA, profileB);
 		brainSpeak(choice.creature, prompt, "delivered [FIELD-OPEN]", true, t -> _memory.add(fight.clanAId, fight.clanBId, t), townKey(fight.townName));
 	}
 
@@ -6612,13 +7511,13 @@ final class DramaEngine
 			final String targetName = fight.namesB.isEmpty() ? clanNameOf(otherClan) : fight.namesB.get(0);
 			// The dare is also how the WORLD learns a fight is on: it must
 			// say who and where, loud and plain, in world chat.
-			brainSpeak(choice.creature, "Your clan's " + (fight.namesA.isEmpty() ? "champion" : fight.namesA.get(0)) + " is walking out RIGHT NOW to fight " + targetName + " of " + clanNameOf(otherClan) + " outside the " + fight.compassSide + " gate of " + fight.townName + ", over " + cause + ". In ONE short world-chat line, call " + targetName + " out by name to that fight and name the place (" + townKey(fight.townName) + ", " + fight.compassSide + " side) - a real call-out to steel, not small talk." + allianceNote(fight, false) + historyTail(speakerClan, otherClan), "delivered [FIELD-OPEN]", true, t -> _memory.add(fight.clanAId, fight.clanBId, t), townKey(fight.townName));
+			brainSpeak(choice.creature, "Your clan's " + (fight.namesA.isEmpty() ? "champion" : fight.namesA.get(0)) + " is walking out RIGHT NOW to fight " + targetName + " of " + clanNameOf(otherClan) + " " + outsidePlace(fight) + ", over " + cause + ". In ONE short world-chat line, call " + targetName + " out by name to that fight and name the place (" + townKey(fight.townName) + ", " + fight.compassSide + " side) - a real call-out to steel, not small talk." + allianceNote(fight, false) + historyTail(speakerClan, otherClan), "delivered [FIELD-OPEN]", true, t -> _memory.add(fight.clanAId, fight.clanBId, t), townKey(fight.townName));
 			// The rival clan gets one answer; then only the field speaks.
 			ThreadPool.schedule(() -> fieldDuelCallout(fight, false), 5000 + Rnd.get(5000));
 		}
 		else
 		{
-			brainSpeak(choice.creature, "You were just called out by name by " + clanNameOf(otherClan) + " to fight outside the " + fight.compassSide + " gate of " + fight.townName + ", and your fighters are heading there now. In ONE short world-chat line, ANSWER them: accept with heat or sharpen the mockery, and say you'll be at " + townKey(fight.townName) + "." + allianceNote(fight, false) + historyTail(speakerClan, otherClan), "delivered [FIELD-ANSWER]", true, t -> _memory.add(fight.clanBId, fight.clanAId, t), townKey(fight.townName));
+			brainSpeak(choice.creature, "You were just called out by name by " + clanNameOf(otherClan) + " to fight " + outsidePlace(fight) + ", and your fighters are heading there now. In ONE short world-chat line, ANSWER them: accept with heat or sharpen the mockery, and say you'll be at " + townKey(fight.townName) + "." + allianceNote(fight, false) + historyTail(speakerClan, otherClan), "delivered [FIELD-ANSWER]", true, t -> _memory.add(fight.clanBId, fight.clanAId, t), townKey(fight.townName));
 		}
 	}
 
@@ -6771,7 +7670,7 @@ final class DramaEngine
 		{
 			return;
 		}
-		final String place = "outside the " + fight.compassSide + " gates of " + fight.townName;
+		final String place = outsidePlace(fight);
 		String prompt;
 		if (crowd.getPersona() == PersonaType.PEACEFUL)
 		{
@@ -6869,11 +7768,11 @@ final class DramaEngine
 				String prompt;
 				if (blood)
 				{
-					prompt = "The duel outside the gates of " + fight.townName + " is OVER: " + loserClan + "'s " + loserNames + " are DOWN, your clan " + clanNameOf(winnerProfile) + " won it - your " + winnerNames + " still standing. ONE short line - the victory brag of your temperament, cold or roaring: mention that they fell.";
+					prompt = "The duel " + outsideTown(fight) + " is OVER: " + loserClan + "'s " + loserNames + " are DOWN, your clan " + clanNameOf(winnerProfile) + " won it - your " + winnerNames + " still standing. ONE short line - the victory brag of your temperament, cold or roaring: mention that they fell.";
 				}
 				else
 				{
-					prompt = "The duel outside the gates of " + fight.townName + " is OVER: " + loserClan + "'s " + loserNames + " backed off, your clan " + clanNameOf(winnerProfile) + " takes the field. ONE short line - a firm, mid-temperature brag of your temperament, no threats past a reminder of who won.";
+					prompt = "The duel " + outsideTown(fight) + " is OVER: " + loserClan + "'s " + loserNames + " backed off, your clan " + clanNameOf(winnerProfile) + " takes the field. ONE short line - a firm, mid-temperature brag of your temperament, no threats past a reminder of who won.";
 				}
 				// A fighter still standing gloats right there on the field,
 				// in local chat, to the beaten side and the crowd.
@@ -6915,7 +7814,7 @@ final class DramaEngine
 			final VoiceChoice loserVoice = (loserMouth != null) ? new VoiceChoice(loserMouth, 0, "", false) : null;
 			if (loserVoice != null)
 			{
-				ThreadPool.schedule(() -> brainWorld(loserVoice.creature, "Your clan " + clanNameOf(loserProfile) + " just LOST a field duel outside the gates of " + fight.townName + " against " + clanNameOf(winnerProfile) + ((blood) ? " - your clansmen " + loserNames + " died there" : " - your clansmen " + loserNames + " had to back off") + ". ONE short line, by your temperament: a bitter howl, a coughed vow of revenge, or a grudging nod.", "delivered [FIELD-LOSS]", t ->
+				ThreadPool.schedule(() -> brainWorld(loserVoice.creature, "Your clan " + clanNameOf(loserProfile) + " just LOST a field duel " + outsideTown(fight) + " against " + clanNameOf(winnerProfile) + ((blood) ? " - your clansmen " + loserNames + " died there" : " - your clansmen " + loserNames + " had to back off") + ". ONE short line, by your temperament: a bitter howl, a coughed vow of revenge, or a grudging nod.", "delivered [FIELD-LOSS]", t ->
 				{
 					// The beaten side's own vow: their mouth, loose
 					// world talk - no third voice needs to join it.
@@ -6954,7 +7853,7 @@ final class DramaEngine
 			final VoiceChoice voice = (drawMouth != null) ? new VoiceChoice(drawMouth, 0, "", false) : null;
 			if (voice != null)
 			{
-				brainWorld(voice.creature, "The field duel outside the gates of " + fight.townName + " between " + clanNameOf(aProfile) + "'s " + String.join(", ", fight.namesA) + " and " + clanNameOf(bProfile) + "'s " + String.join(", ", fight.namesB) + ((note != null) ? " just scattered (" + note + ")" : "just ended even - both sides hurt, none dead") + ". ONE short line, ending it in words: either clan's tone is fine.", "delivered [FIELD-DRAW]", t ->
+				brainWorld(voice.creature, "The field duel " + outsideTown(fight) + " between " + clanNameOf(aProfile) + "'s " + String.join(", ", fight.namesA) + " and " + clanNameOf(bProfile) + "'s " + String.join(", ", fight.namesB) + ((note != null) ? " just scattered (" + note + ")" : "just ended even - both sides hurt, none dead") + ". ONE short line, ending it in words: either clan's tone is fine.", "delivered [FIELD-DRAW]", t ->
 				{
 					// The ending note is a party's own word - world chat.
 					_memory.add(aProfile.getId(), bProfile.getId(), t);
@@ -7452,8 +8351,12 @@ final class DramaEngine
 		}
 		if (voices.isEmpty())
 		{
-			_arcs.remove(arcKey(speakerId, targetId));
+			final DramaArc gone = _arcs.remove(arcKey(speakerId, targetId));
 			focusReleased(System.currentTimeMillis());
+			if ((gone != null) && !Boolean.TRUE.equals(gone.war))
+			{
+				addGrievance(_profiles.get(speakerId), _profiles.get(targetId), "the quarrel just fizzled out");
+			}
 			return; // nobody left to argue; the drama dissolves with no line
 		}
 		final ClanProfile chosen = voices.get(Rnd.get(voices.size()));
@@ -7515,6 +8418,29 @@ final class DramaEngine
 		// is one more beat of REAL bickering - the very stuff steel
 		// needs simmering behind it before fists are ever justified.
 		noteBicker(speakerId, targetId);
+		// An alliance war (user, 2026-10-21): once the grudge between two
+		// alliances is deep enough, the next quarrel between them drags the
+		// whole alliances in - allied clans chime in on both sides - and
+		// it ends in an EPIC battle.
+		if (arc.war == null)
+		{
+			final String warKey = grievanceKey(speakerProfile, targetProfile);
+			// Peaceful clans never strike first: two Peaceful clans quarreling
+			// don't start the war - it waits for a quarrel with a hothead in it.
+			final boolean bothPeaceful = (speakerProfile != null) && (targetProfile != null) && (speakerProfile.getPersona() == PersonaType.PEACEFUL) && (targetProfile.getPersona() == PersonaType.PEACEFUL);
+			final boolean war = _allianceWars && (warKey != null) && !bothPeaceful && (_warDue.contains(warKey) || (grievanceCount(speakerProfile, targetProfile) >= _allianceWarAt));
+			arc.war = Boolean.valueOf(war);
+			if (war && (_infoHook != null))
+			{
+				_infoHook.accept("clan-personalities: [ALLIANCE-WAR] " + warKey.replace("+", " vs ") + " - " + grievanceCount(speakerProfile, targetProfile) + " grievances deep: the quarrel between " + clanNameOf(speakerProfile) + " and " + clanNameOf(targetProfile) + " drags both alliances in.");
+			}
+		}
+		if (Boolean.TRUE.equals(arc.war) && (arc.warLines < _warAllyLines) && (Rnd.get(100) < 70))
+		{
+			arc.warLines++;
+			final boolean speakerSide = (arc.warLines % 2) == 1;
+			ThreadPool.schedule(() -> allyChime(speakerSide ? speakerProfile : targetProfile, speakerSide ? targetProfile : speakerProfile, arc.cause), 5000 + Rnd.get(6000) + spacingHold());
+		}
 		final int round = arc.nextRound();
 		// A waved-off threat lets the air out: the quarrel winds down faster.
 		final int resolveChance = arc.defused ? Math.min(100, (_resolveChance * 2) + 10) : _resolveChance;
@@ -7546,7 +8472,20 @@ final class DramaEngine
 			}
 			else
 			{
+				if (!Boolean.TRUE.equals(arc.war))
+				{
+					addGrievance(speakerProfile, targetProfile, "it ended in silence, nothing settled");
+				}
 				return; // nobody left to speak the solution; it ends in silence
+			}
+		}
+		if (Boolean.TRUE.equals(arc.war) && (closer.getPersona() == PersonaType.PEACEFUL))
+		{
+			// The war cry comes from the side that wants the war.
+			final ClanProfile other = (closer == speakerProfile) ? targetProfile : speakerProfile;
+			if ((other != null) && (other.getPersona() != PersonaType.PEACEFUL) && !resolveMembers(other.getId()).isEmpty())
+			{
+				closer = other;
 			}
 		}
 		final PersonaType persona = closer.getPersona();
@@ -7569,7 +8508,27 @@ final class DramaEngine
 		}
 		// How the threat was read shades the ending: a confirmed threat
 		// pushes toward steel, a waved-off one toward letting it rest.
-		final boolean fightShaded = (arc.confirmed && (persona != PersonaType.PEACEFUL)) ? (fight || (Rnd.get(100) < 35)) : (arc.defused ? (fight && (Rnd.get(100) < 40)) : fight);
+		final boolean isWar = Boolean.TRUE.equals(arc.war);
+		final boolean fightShaded = isWar || ((arc.confirmed && (persona != PersonaType.PEACEFUL)) ? (fight || (Rnd.get(100) < 35)) : (arc.defused ? (fight && (Rnd.get(100) < 40)) : fight));
+		if (isWar)
+		{
+			// The war is ON: no grievance, the battle settles it.
+			final String warKey = grievanceKey(speakerProfile, targetProfile);
+			if (warKey != null)
+			{
+				_warDue.add(warKey);
+				saveRecords();
+				scheduleWarStaging(speakerProfile, targetProfile, 0);
+			}
+		}
+		else if (fightShaded)
+		{
+			// A war cry: satisfying only if steel actually follows.
+			if (grievanceKey(speakerProfile, targetProfile) != null)
+			{
+				_pendingWarCries.put(key, Long.valueOf(now + _warCryWindowMillis));
+			}
+		}
 
 		final ClanProfile answerProfile = closer;
 		final ClanProfile against = (closer == speakerProfile) ? targetProfile : speakerProfile;
@@ -7690,6 +8649,16 @@ final class DramaEngine
 	 */
 	private String chooseCause(ClanProfile self, ClanProfile other)
 	{
+		if (other != null)
+		{
+			// Phase 3: a quarrel a player's accusation started is about THAT.
+			final String accused = _accuseCauses.remove(arcKey(self.getId(), other.getId()));
+			if (accused != null)
+			{
+				_pairCauses.put(arcKey(self.getId(), other.getId()), accused);
+				return accused;
+			}
+		}
 		if (_offenseCauses.isEmpty() || (other == null))
 		{
 			return null;
@@ -8073,6 +9042,9 @@ final class DramaEngine
 		/** The threat was confirmed (hotter) or waved off (cooler). */
 		volatile boolean confirmed;
 		volatile boolean defused;
+		/** null = not checked yet; true = this quarrel is an alliance war. */
+		volatile Boolean war;
+		volatile int warLines;
 
 		DramaArc(int startRound, String cause)
 		{
@@ -8094,6 +9066,78 @@ final class DramaEngine
 			voiceSwitches++;
 			return (voiceSwitches >= 2) && !leadershipAsked;
 		}
+	}
+
+	/**
+	 * Alliance war: a clan allied to one side of the quarrel joins it in
+	 * world chat, standing with its alliance brother against the other.
+	 * A Peaceful ally goes along - loyal, but not happy about it.
+	 */
+	private void allyChime(ClanProfile brother, ClanProfile foe, String cause)
+	{
+		if ((brother == null) || (foe == null) || (brother.getAllianceGroup() <= 0))
+		{
+			return;
+		}
+		final List<ClanProfile> allies = new ArrayList<>();
+		for (ClanProfile profile : _profiles.values())
+		{
+			if ((profile != brother) && (profile != foe) && (profile.getPersona() != null) && (profile.getAllianceGroup() == brother.getAllianceGroup()) && !resolveMembers(profile.getId()).isEmpty())
+			{
+				allies.add(profile);
+			}
+		}
+		if (allies.isEmpty())
+		{
+			return;
+		}
+		final ClanProfile ally = allies.get(Rnd.get(allies.size()));
+		final VoiceChoice voice = chooseVoice(ally);
+		if (voice == null)
+		{
+			return;
+		}
+		final String alliance = allianceKeyOf(brother);
+		final String foeSide = allianceKeyOf(foe);
+		final boolean peaceful = ally.getPersona() == PersonaType.PEACEFUL;
+		final String prompt = "Your alliance " + alliance + " and " + foeSide + " have been at each other's throats for a long time, and now your alliance brother " + clanNameOf(brother) + " is in an open quarrel with " + clanNameOf(foe) + (((cause != null) && !cause.isEmpty()) ? (" about " + cause) : "") + ". The whole alliance is getting pulled in. "
+			+ (peaceful ? ("Your clan " + clanNameOf(ally) + " is Peaceful and hates this - but you stand with your alliance. In ONE short line, side with " + clanNameOf(brother) + " against " + clanNameOf(foe) + ", reluctant and unhappy that it came to this.") : ("Your clan " + clanNameOf(ally) + " stands with its brother: in ONE short line, side with " + clanNameOf(brother) + " against " + clanNameOf(foe) + " by name, in your clan's own temper."));
+		if (_infoHook != null)
+		{
+			_infoHook.accept("clan-personalities: [ALLIANCE-WAR] " + clanNameOf(ally) + " (" + alliance + ") joins the quarrel on " + clanNameOf(brother) + "'s side" + (peaceful ? " - reluctantly." : "."));
+		}
+		brainWorld(voice.creature, prompt, "delivered [ALLIANCE-WAR]");
+	}
+
+	/**
+	 * The alliance war's battle: staged as soon as the stage allows, a
+	 * forced EPIC with alliance pools. Retries while the world is busy (a
+	 * duel on, nobody online, no fair arena); if it never happens the war
+	 * stays due, so the next duel between the alliances is the war.
+	 */
+	private void scheduleWarStaging(ClanProfile a, ClanProfile b, int attempt)
+	{
+		if (attempt > 20)
+		{
+			if (_infoHook != null)
+			{
+				_infoHook.accept("clan-personalities: [ALLIANCE-WAR] the battle could not be staged yet - it stays due for the next duel between " + allianceKeyOf(a) + " and " + allianceKeyOf(b) + ".");
+			}
+			return;
+		}
+		ThreadPool.schedule(() ->
+		{
+			final String key = grievanceKey(a, b);
+			if ((key == null) || !_warDue.contains(key))
+			{
+				return; // already fought
+			}
+			final long now = System.currentTimeMillis();
+			if (!humanOnline() || fieldStageFrozen(now) || !stageFight(a, b, now))
+			{
+				scheduleWarStaging(a, b, attempt + 1);
+			}
+		}, ((attempt == 0) ? 40000L : 60000L) + Rnd.get(10000));
 	}
 
 	/** The solution line: a war cry or a diplomatic close, brain-written. */
@@ -8422,6 +9466,294 @@ final class DramaEngine
 		_arenaTownTries = Math.max(0, townTries);
 	}
 
+	// ── Level bands (user, 2026-10-21) ──────────────────────────────────
+	/** Town (dense name) -> {min, max, preferred(1/0)} ranges; an empty list = wildcard. */
+	private final Map<String, List<int[]>> _townBands = new ConcurrentHashMap<>();
+	private int _wildScanRadius = 3000;
+	private int _wildLevelGap = 8;
+
+	/**
+	 * ArenaTownBands, e.g. "Talking Island: any, Gludio Castle Town: 20-40,
+	 * Giran Castle Town: 40-99* / 20-39". A range with * is PREFERRED (the
+	 * town is the first choice for those duels); "any" makes a wildcard that
+	 * takes every level but only after the towns that fit. Unlisted towns
+	 * take any level too, judged by the wildlife scan alone.
+	 */
+	void setArenaTownBands(String spec)
+	{
+		_townBands.clear();
+		if (spec == null)
+		{
+			return;
+		}
+		for (String entry : spec.split(","))
+		{
+			final int colon = entry.indexOf(':');
+			if (colon <= 0)
+			{
+				continue;
+			}
+			final String town = denseName(entry.substring(0, colon));
+			final List<int[]> ranges = new ArrayList<>();
+			for (String raw : entry.substring(colon + 1).split("/"))
+			{
+				String part = raw.trim().toLowerCase();
+				if (part.equals("any"))
+				{
+					continue; // a wildcard: no ranges
+				}
+				final boolean preferred = part.endsWith("*");
+				part = part.replace("*", "").trim();
+				final int dash = part.indexOf('-');
+				try
+				{
+					final int lo = (dash > 0) ? Integer.parseInt(part.substring(0, dash).trim()) : Integer.parseInt(part.replace("+", "").trim());
+					final int hi = (dash > 0) ? Integer.parseInt(part.substring(dash + 1).trim()) : 99;
+					ranges.add(new int[]
+					{
+						lo,
+						hi,
+						preferred ? 1 : 0
+					});
+				}
+				catch (NumberFormatException e)
+				{
+					// a malformed range is skipped
+				}
+			}
+			if (!town.isEmpty())
+			{
+				_townBands.put(town, ranges);
+			}
+		}
+	}
+
+	private static String denseName(String text)
+	{
+		final StringBuilder d = new StringBuilder();
+		for (char c : text.toLowerCase().toCharArray())
+		{
+			if (Character.isLetterOrDigit(c))
+			{
+				d.append(c);
+			}
+		}
+		return d.toString();
+	}
+
+	void setWildScan(int radius, int levelGap)
+	{
+		_wildScanRadius = Math.max(500, Math.min(10000, radius));
+		_wildLevelGap = Math.max(0, Math.min(40, levelGap));
+	}
+
+	/** 0 = a preferred band fits, 1 = a band fits, 2 = no band (scan only), 3 = wildcard, -1 = the band rules it out. */
+	private int bandRank(TownZone zone, double avgLevel)
+	{
+		if (zone.getName() == null)
+		{
+			return 2;
+		}
+		final List<int[]> ranges = _townBands.get(denseName(zone.getName()));
+		if (ranges == null)
+		{
+			return 2;
+		}
+		if (ranges.isEmpty())
+		{
+			return 3;
+		}
+		int best = -1;
+		for (int[] range : ranges)
+		{
+			if ((avgLevel >= range[0]) && (avgLevel <= (range[1] + 0.999)))
+			{
+				final int rank = (range[2] == 1) ? 0 : 1;
+				best = (best < 0) ? rank : Math.min(best, rank);
+			}
+		}
+		return best;
+	}
+
+	/**
+	 * The wildlife scan: among the monsters (no raid bosses, no minions)
+	 * within ArenaWildScanRadius of the spot, the strongest typical one -
+	 * the 90th percentile level, so one stray elite doesn't decide it - may
+	 * be at most ArenaWildLevelGap above the LOWEST fighter.
+	 */
+	private boolean wildTooStrong(List<Monster> wild, int x, int y, int minLevel)
+	{
+		if (wild.isEmpty())
+		{
+			return false;
+		}
+		final List<Integer> levels = new ArrayList<>();
+		final long r2 = (long) _wildScanRadius * _wildScanRadius;
+		for (Monster monster : wild)
+		{
+			final long dx = monster.getX() - x;
+			final long dy = monster.getY() - y;
+			if (((dx * dx) + (dy * dy)) <= r2)
+			{
+				levels.add(Integer.valueOf(monster.getLevel()));
+			}
+		}
+		if (levels.isEmpty())
+		{
+			return false;
+		}
+		Collections.sort(levels);
+		final int typical = levels.get(Math.min(levels.size() - 1, (int) Math.floor(levels.size() * 0.9))).intValue();
+		return typical > (minLevel + _wildLevelGap);
+	}
+
+	/** Cliff test for duel pistes: radius searched, and the biggest fall
+	 *  allowed over one 32-unit step (0 = test off). */
+	private int _edgeRadius = 500;
+	private int _edgeMaxStep = 250;
+
+	/** The sea: ground below this height near a piste is open water (0 = off). */
+	private int _seaLevel = -3760;
+	private int _shoreRadius = 400;
+
+	void setShore(int seaLevel, int shoreRadius)
+	{
+		_seaLevel = seaLevel;
+		_shoreRadius = Math.max(0, Math.min(2000, shoreRadius));
+	}
+
+	/**
+	 * The coasts carry no water zone in this pack, and a beach slopes too
+	 * gently for the cliff test - a duel could land in the sea off Talking
+	 * Island (user, 2026-10-21). The server only knows the sea FLOOR, so the
+	 * waterline is a height: measured in game at the Talking Island beach,
+	 * /loc -81824, 239183, -3760. Any ground below ArenaSeaLevel within
+	 * ArenaShoreRadius of a spot is sea.
+	 */
+	private boolean seaNear(int x, int y, int z)
+	{
+		if ((_seaLevel == 0) || (_shoreRadius <= 0))
+		{
+			return false;
+		}
+		final GeoEngine geo = GeoEngine.getInstance();
+		if (geo.getHeight(x, y, z) < _seaLevel)
+		{
+			return true;
+		}
+		for (int r = 100; r <= _shoreRadius; r += 100)
+		{
+			for (int k = 0; k < 16; k++)
+			{
+				final double a = k * (Math.PI / 8);
+				if (geo.getHeight((int) (x + (r * Math.cos(a))), (int) (y + (r * Math.sin(a))), z) < _seaLevel)
+				{
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	void setArenaEdge(int radius, int maxStep)
+	{
+		_edgeRadius = Math.max(64, Math.min(2000, radius));
+		_edgeMaxStep = Math.max(0, maxStep);
+	}
+
+	/**
+	 * True when the ground falls away suddenly anywhere within the edge
+	 * radius: walking out along 16 rays in 32-unit steps, one step that
+	 * drops more than ArenaMaxStep is a cliff or a pit lip. Measured on the
+	 * pack's own geodata (playtest 2026-10-21, Hunter Village): the pit-lip
+	 * spot fell 416 in one step within 300 units; open fields stay under
+	 * 100 and rough hillsides under 200.
+	 */
+	private boolean cliffNear(int x, int y, int z)
+	{
+		if (_edgeMaxStep <= 0)
+		{
+			return false;
+		}
+		final GeoEngine geo = GeoEngine.getInstance();
+		final int z0 = geo.getHeight(x, y, z);
+		for (int k = 0; k < 16; k++)
+		{
+			final double a = k * (Math.PI / 8);
+			final double cos = Math.cos(a);
+			final double sin = Math.sin(a);
+			int last = z0;
+			for (int r = 32; r <= _edgeRadius; r += 32)
+			{
+				final int here = geo.getHeight((int) (x + (r * cos)), (int) (y + (r * sin)), last);
+				if ((last - here) > _edgeMaxStep)
+				{
+					return true;
+				}
+				last = here;
+			}
+		}
+		return false;
+	}
+
+	/** No-go circles for duel pistes: {x, y, radius}. */
+	private final List<int[]> _arenaBlocked = new java.util.concurrent.CopyOnWriteArrayList<>();
+
+	/**
+	 * ArenaBlockedSpots: "x,y,radius; x,y,radius". No duel piste - and no road
+	 * mouth (gate guard) - inside a circle is used. Playtest 2026-10-21:
+	 * Hunter Village's east gate (piste 118372,73628, door guard Gardner)
+	 * drops fighters into a pit where nobody can watch.
+	 */
+	void setArenaBlockedSpots(String spec)
+	{
+		_arenaBlocked.clear();
+		if (spec == null)
+		{
+			return;
+		}
+		for (String entry : spec.split(";"))
+		{
+			final String[] parts = entry.trim().split("\\s*,\\s*");
+			if (parts.length != 3)
+			{
+				continue;
+			}
+			try
+			{
+				_arenaBlocked.add(new int[]
+				{
+					Integer.parseInt(parts[0].trim()),
+					Integer.parseInt(parts[1].trim()),
+					Math.max(1, Integer.parseInt(parts[2].trim()))
+				});
+			}
+			catch (NumberFormatException e)
+			{
+				// a malformed entry is skipped
+			}
+		}
+	}
+
+	int arenaBlockedCount()
+	{
+		return _arenaBlocked.size();
+	}
+
+	private boolean arenaBlocked(int x, int y)
+	{
+		for (int[] spot : _arenaBlocked)
+		{
+			final long dx = x - spot[0];
+			final long dy = y - spot[1];
+			if (((dx * dx) + (dy * dy)) <= ((long) spot[2] * spot[2]))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
 	/** Pre-fight runway: how long the world gets to walk to the gates. */
 	void setFieldLeadSeconds(int seconds)
 	{
@@ -8472,6 +9804,36 @@ final class DramaEngine
 	void setMaxGearGap(int gap)
 	{
 		_maxGearGap = Math.max(0, Math.min(100, gap));
+	}
+
+	void setDuelSizes(int maxSquad, int epicChance, int epicMin, int epicMax)
+	{
+		_fieldMaxSquad = Math.max(1, Math.min(3, maxSquad));
+		_epicChance = Math.max(0, Math.min(100, epicChance));
+		_epicMin = Math.max(4, Math.min(9, epicMin));
+		_epicMax = Math.max(_epicMin, Math.min(9, epicMax));
+	}
+
+	void setBareGearMax(int score)
+	{
+		_bareGearMax = Math.max(-1, Math.min(20, score));
+	}
+
+	void setAvoidSoloMatchups(String spec)
+	{
+		_avoidSolo.clear();
+		if (spec == null)
+		{
+			return;
+		}
+		for (String raw : spec.split(","))
+		{
+			final String pair = raw.trim().toUpperCase().replace(' ', '-');
+			if (pair.indexOf('-') > 0)
+			{
+				_avoidSolo.add(pair);
+			}
+		}
 	}
 
 	void setFieldHeralds(int heralds)
@@ -9024,6 +10386,467 @@ final class DramaEngine
 		}
 		final org.l2jmobius.gameserver.network.GameClient client = player.getClient();
 		return (client != null) && !client.isDetached();
+	}
+
+	// ── Phase 3 bridge: player accusations (Accusations.java) ─────────────
+	// Read-only views and one speak call, so the accusation code lives in
+	// its own file and the engine stays the Phase 1-2 home.
+
+	Collection<ClanProfile> accuseProfiles()
+	{
+		return _profiles.values();
+	}
+
+	/** The clans, in a fresh random order (who weighs in should vary). */
+	List<ClanProfile> accuseProfilesList()
+	{
+		final List<ClanProfile> list = new ArrayList<>(_profiles.values());
+		Collections.shuffle(list);
+		return list;
+	}
+
+	ClanProfile accuseProfile(int clanId)
+	{
+		return _profiles.get(clanId);
+	}
+
+	String accuseClanName(ClanProfile profile)
+	{
+		return clanNameOf(profile);
+	}
+
+	String accuseAbbrev(ClanProfile profile)
+	{
+		return (profile.getName() != null) ? abbrevFor(profile.getName()) : null;
+	}
+
+	String accuseNickname(ClanProfile profile)
+	{
+		return (profile.getName() != null) ? _clanNicknames.get(normalizeClanToken(profile.getName())) : null;
+	}
+
+	boolean accuseIsHuman(Player player)
+	{
+		return isHumanWatcher(null, player);
+	}
+
+	boolean accuseStageFrozen()
+	{
+		return fieldStageFrozen(System.currentTimeMillis());
+	}
+
+	/** True when the clan has fighters in a duel that is forming or running. */
+	boolean accuseInDuel(int clanId)
+	{
+		for (FieldFight fight : _fieldFights.values())
+		{
+			if ((fight.clanAId == clanId) || (fight.clanBId == clanId))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** What owns the stage, for a brush-off line ("a clan duel between ..."). */
+	String accuseDuelNote()
+	{
+		for (FieldFight fight : _fieldFights.values())
+		{
+			return "a real clan duel between " + clanNameOf(_profiles.get(fight.clanAId)) + " and " + clanNameOf(_profiles.get(fight.clanBId)) + " is going on outside " + fight.townName;
+		}
+		return "a clan duel has just ended and everyone is still talking about it";
+	}
+
+	boolean accuseMembersPresent(int clanId)
+	{
+		return !resolveMembers(clanId).isEmpty();
+	}
+
+	/** The clan member closest to the player within range, or null. */
+	Creature accuseMemberNear(int clanId, Player player, int range)
+	{
+		Creature best = null;
+		long bestDistance = (long) range * range;
+		for (Creature member : resolveMembers(clanId))
+		{
+			final long dx = member.getX() - player.getX();
+			final long dy = member.getY() - player.getY();
+			final long distance = (dx * dx) + (dy * dy);
+			if (distance <= bestDistance)
+			{
+				bestDistance = distance;
+				best = member;
+			}
+		}
+		return best;
+	}
+
+	/** The clan this one is quarreling with right now, or 0. */
+	int accuseArcOpponent(int clanId)
+	{
+		for (String key : _arcs.keySet())
+		{
+			final int dash = key.indexOf('-');
+			if (dash <= 0)
+			{
+				continue;
+			}
+			try
+			{
+				final int low = Integer.parseInt(key.substring(0, dash));
+				final int high = Integer.parseInt(key.substring(dash + 1));
+				if (low == clanId)
+				{
+					return high;
+				}
+				if (high == clanId)
+				{
+					return low;
+				}
+			}
+			catch (NumberFormatException e)
+			{
+				// not a pair key
+			}
+		}
+		return 0;
+	}
+
+	boolean accuseArgued(int a, int b)
+	{
+		return _memory.argued(a, b, _grudgeWindowMillis);
+	}
+
+	boolean accuseHasGrudge(int clanId)
+	{
+		return hasAnyGrudge(clanId);
+	}
+
+	boolean accuseHasRecord(int a, int b)
+	{
+		return _records.containsKey(arcKey(a, b));
+	}
+
+	/** Duels this clan has WON (against anyone, or against `rivalId` when
+	 *  it is > 0) - the only record that shows it has actually killed. */
+	int accuseDuelWins(int clanId, int rivalId)
+	{
+		int wins = 0;
+		for (Map.Entry<String, PairRecord> entry : _records.entrySet())
+		{
+			final String key = entry.getKey();
+			final int dash = key.indexOf('-');
+			if (dash <= 0)
+			{
+				continue;
+			}
+			try
+			{
+				final int low = Integer.parseInt(key.substring(0, dash));
+				final int high = Integer.parseInt(key.substring(dash + 1));
+				if ((rivalId > 0) && !(((low == clanId) && (high == rivalId)) || ((high == clanId) && (low == rivalId))))
+				{
+					continue;
+				}
+				if (low == clanId)
+				{
+					wins += entry.getValue().winsLow;
+				}
+				else if (high == clanId)
+				{
+					wins += entry.getValue().winsHigh;
+				}
+			}
+			catch (NumberFormatException e)
+			{
+				// not a pair key
+			}
+		}
+		return wins;
+	}
+
+	boolean accuseRecordInvolves(int clanId)
+	{
+		return pairKeyInvolves(_records.keySet(), clanId);
+	}
+
+	/** True when THIS clan did a kindness (as the helper) this session. */
+	boolean accuseDidKindness(int clanId)
+	{
+		return _kindnessBy.containsKey(Integer.valueOf(clanId));
+	}
+
+	/** Helper clan id -> { helped clan id, when }: the direction of a kindness,
+	 *  which _goodDeeds (a pair key) does not keep. */
+	private final Map<Integer, long[]> _kindnessBy = new ConcurrentHashMap<>();
+
+	private static boolean pairKeyInvolves(Collection<String> keys, int clanId)
+	{
+		final String low = clanId + "-";
+		final String high = "-" + clanId;
+		for (String key : keys)
+		{
+			if (key.startsWith(low) || key.endsWith(high))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	String accuseHistory(ClanProfile self, ClanProfile other)
+	{
+		return historyNote(self, other);
+	}
+
+	long accuseSpacingHold()
+	{
+		return spacingHold();
+	}
+
+	long accuseBeatSpacing()
+	{
+		return _minBeatSpacingMillis;
+	}
+
+	// ── Phase 3 bridge, slice 2a: outcomes ─────────────────────────────
+
+	/** Pair key -> the accusation a quarrel opened by it is about. */
+	private final Map<String, String> _accuseCauses = new ConcurrentHashMap<>();
+	/** Clan id -> until when it sulks in silence (caught being nice). */
+	private final Map<Integer, Long> _sulkUntil = new ConcurrentHashMap<>();
+
+	boolean accuseSulking(int clanId)
+	{
+		final Long until = _sulkUntil.get(clanId);
+		if (until == null)
+		{
+			return false;
+		}
+		if (System.currentTimeMillis() >= until.longValue())
+		{
+			_sulkUntil.remove(clanId);
+			accuseInfo("[ACCUSE-SULK] " + clanNameOf(_profiles.get(clanId)) + " is talking again.");
+			return false;
+		}
+		return true;
+	}
+
+	/**
+	 * Caught being nice: the clan drops out of every argument it is in (no
+	 * war cry, no peace line; the pair rests the long way) and says nothing
+	 * through the drama queue until the sulk ends. Duels already staged run.
+	 */
+	void accuseSulk(ClanProfile clan, long millis)
+	{
+		final long now = System.currentTimeMillis();
+		final long until = now + Math.max(60000L, millis);
+		_sulkUntil.put(clan.getId(), Long.valueOf(until));
+		clan.cooldown(until); // no new openings, taunts or kindness rolls either
+		final List<String> dropped = new ArrayList<>();
+		for (String key : new ArrayList<>(_arcs.keySet()))
+		{
+			if (key.startsWith(clan.getId() + "-") || key.endsWith("-" + clan.getId()))
+			{
+				_arcs.remove(key);
+				_pairRestUntil.put(key, Long.valueOf(now + _maxPairRestMillis));
+				dropped.add(key);
+			}
+		}
+		if (!dropped.isEmpty())
+		{
+			focusReleased(now);
+		}
+		accuseInfo("[ACCUSE-SULK] " + clanNameOf(clan) + " goes silent for " + ((until - now) / 60000) + " min" + (dropped.isEmpty() ? "." : " and drops out of " + dropped.size() + " argument(s)."));
+	}
+
+	/**
+	 * Start a quarrel because of an accusation: heat the pair by `beats`,
+	 * and queue the starter's opening line about `cause`. Returns null when
+	 * a quarrel was queued, otherwise why not (the heat still applies).
+	 */
+	String accuseOpenQuarrel(ClanProfile starter, ClanProfile target, String cause, int beats, long delayMillis)
+	{
+		if ((starter == null) || (target == null) || (starter.getPersona() == null) || (target.getPersona() == null))
+		{
+			return "a clan has no persona";
+		}
+		final String key = arcKey(starter.getId(), target.getId());
+		for (int i = 0; i < beats; i++)
+		{
+			noteBicker(starter.getId(), target.getId());
+		}
+		if (starter.getPersona() == PersonaType.PEACEFUL)
+		{
+			return "a Peaceful clan never opens a quarrel (heated by " + beats + ")";
+		}
+		if (accuseSulking(starter.getId()) || accuseSulking(target.getId()))
+		{
+			return "a clan is sulking (heated by " + beats + ")";
+		}
+		if (_arcs.containsKey(key))
+		{
+			return "they are already quarreling (heated by " + beats + ")";
+		}
+		if (pairAtRest(starter.getId(), target.getId()))
+		{
+			return "the pair is resting from its last quarrel (heated by " + beats + ")";
+		}
+		_accuseCauses.put(key, cause);
+		_queue.schedule(starter.getId(), MessageKind.START, target.getId(), Math.max(1000L, delayMillis));
+		return null;
+	}
+
+	/** Heat a pair toward steel without opening anything (a tipped quarrel). */
+	void accuseHeat(int a, int b, int beats)
+	{
+		for (int i = 0; i < beats; i++)
+		{
+			noteBicker(a, b);
+		}
+	}
+
+	/** How hot a pair runs right now: a live quarrel, a warm grudge, a duel
+	 *  record, a simmering brew; alliance brothers cool it. 0 = no tension. */
+	int accuseTension(int a, int b)
+	{
+		final String key = arcKey(a, b);
+		int score = 0;
+		if (_arcs.containsKey(key))
+		{
+			score += 3;
+		}
+		if (_memory.argued(a, b, _grudgeWindowMillis))
+		{
+			score += 2;
+		}
+		if (_records.containsKey(key))
+		{
+			score += 1;
+		}
+		final long[] brew = _brew.get(key);
+		if (brew != null)
+		{
+			score += (int) Math.min(2L, brew[0] / 2);
+		}
+		final ClanProfile pa = _profiles.get(a);
+		if ((pa != null) && pa.isAlliedWith(_profiles.get(b)))
+		{
+			score -= 1;
+		}
+		return Math.max(0, score);
+	}
+
+	/** The clan this one most recently did a kindness FOR, or 0. */
+	int accuseKindnessPartner(int clanId)
+	{
+		final long[] kind = _kindnessBy.get(Integer.valueOf(clanId));
+		return (kind != null) ? (int) kind[0] : 0;
+	}
+
+	// ── Phase 3 bridge: the .clanp test command ──────────────────────────
+
+	/** Test: record that helper did helped a kindness (the nice-sulk egg). */
+	void accuseSeedKindness(int helperId, int helpedId)
+	{
+		final long now = System.currentTimeMillis();
+		_goodDeeds.put(arcKey(helperId, helpedId), Long.valueOf(now));
+		_kindnessBy.put(Integer.valueOf(helperId), new long[] { helpedId, now });
+		accuseInfo("[TEST] kindness seeded: " + clanNameOf(_profiles.get(helperId)) + " helped " + clanNameOf(_profiles.get(helpedId)) + ".");
+	}
+
+	/** Test: end a sulk now. */
+	boolean accuseUnsulk(int clanId)
+	{
+		return _sulkUntil.remove(clanId) != null;
+	}
+
+	/** Test: minutes left on a sulk, or 0. */
+	long accuseSulkMinutesLeft(int clanId)
+	{
+		final Long until = _sulkUntil.get(clanId);
+		return (until == null) ? 0 : Math.max(0, (until.longValue() - System.currentTimeMillis()) / 60000);
+	}
+
+	/** Test: the quarrels running right now, as "A vs B (round n)". */
+	List<String> accuseArcSummaries()
+	{
+		final List<String> out = new ArrayList<>();
+		for (Map.Entry<String, DramaArc> entry : _arcs.entrySet())
+		{
+			final String key = entry.getKey();
+			final int dash = key.indexOf('-');
+			if (dash <= 0)
+			{
+				continue;
+			}
+			try
+			{
+				out.add(clanNameOf(_profiles.get(Integer.parseInt(key.substring(0, dash)))) + " vs " + clanNameOf(_profiles.get(Integer.parseInt(key.substring(dash + 1)))));
+			}
+			catch (NumberFormatException e)
+			{
+				// not a pair key
+			}
+		}
+		return out;
+	}
+
+	/** Test: how many bicker beats a pair has brewed, and how many it needs. */
+	String accuseBrewText(int a, int b)
+	{
+		final String key = arcKey(a, b);
+		final long[] brew = _brew.get(key);
+		final int need = _brewBeats * (alliedPairKey(key) ? _allianceBrewFactor : 1);
+		return ((brew == null) ? 0 : brew[0]) + "/" + need + " beats" + (brewedForSteel(key) ? " - ready for steel" : "");
+	}
+
+	/** Remember an accusation line in the pair's chat memory, so later
+	 *  quarrels between them can bring it up. */
+	void accuseRemember(int speakerId, int otherId, String text)
+	{
+		if ((otherId > 0) && (text != null))
+		{
+			_memory.add(speakerId, otherId, text);
+		}
+	}
+
+	void accuseInfo(String message)
+	{
+		if (_infoHook != null)
+		{
+			_infoHook.accept("clan-personalities: " + message);
+		}
+	}
+
+	/**
+	 * One accusation answer. With a nearby mouth (local chat) it is spoken
+	 * locally by that member; otherwise the clan's usual voice speaks in the
+	 * drama channel. Goes through the one-slot brain gate like every line.
+	 */
+	void accuseSpeak(ClanProfile clan, Creature nearMouth, String situation, String label)
+	{
+		accuseSpeak(clan, nearMouth, situation, label, null);
+	}
+
+	void accuseSpeak(ClanProfile clan, Creature nearMouth, String situation, String label, Consumer<String> after)
+	{
+		Creature mouth = nearMouth;
+		String title = null;
+		if (mouth == null)
+		{
+			final VoiceChoice voice = chooseVoice(clan);
+			if (voice == null)
+			{
+				accuseInfo("[ACCUSE-SKIP] " + clanNameOf(clan) + " has no voice in the world right now.");
+				return;
+			}
+			mouth = voice.creature;
+			title = voice.title;
+		}
+		final String prompt = situation + " You speak for your clan " + clanNameOf(clan) + (((title != null) && !title.isEmpty()) ? (" as its " + title) : "") + ". Your clan's temperament is " + personaHint(clan.getPersona());
+		brainSpeak(mouth, prompt, label, nearMouth == null, after);
 	}
 
 	// ── Is anyone real here? (v0.2.3) ───────────────────────────────────

@@ -1,12 +1,14 @@
 # Clan Personalities
 
-**Clans in your Lineage 2 world that actually *talk* — and settle it with steel. They argue, hold grudges, help each other, remember everything, and when a feud boils over, they fight it out in front of you.**
+**Clans in your Lineage 2 world that actually *talk* — and settle it with steel. They argue, hold grudges, help each other, remember everything, and when a feud boils over, they fight it out in front of you. And now they answer *you*.**
 
-**Latest: [v0.2.3](https://github.com/Wyrbun/clan-personalities/releases/tag/v0.2.3)** — Phase 2 field duels, public testing.
+**Latest: [v0.3.0](https://github.com/Wyrbun/clan-personalities/releases/tag/v0.3.0)** — the clans answer back: accuse them, praise them, take sides, or just say hello.
 
 This module gives living clans five personalities (Peaceful, Neutral, Altruistic, Aggressive, Player-Killing). Their bots speak in world chat through the pack's FPC brain: they pick quarrels over concrete incidents, taunt and threaten, fire back at whoever calls them out, drag their allies in, soften into kindness when the stage is calm, and retell old wars days later — each side remembering it their own way.
 
 When words aren't enough, the quarrel becomes a **real NPC-vs-NPC duel** just outside a town gate: announced in world chat, matched fairly by level and gear, fought with the pack's own combat (mages cast, healers heal), watched by a gossiping crowd — and remembered. Winners gloat; losers want revenge next time.
+
+And you are part of it: name a clan in world chat — "SunSpear ganked me at Cruma", "BloodRaven helped me, they're nice", "hey IvoryCrown, what's up?" — and it answers in character. The rest of the world weighs in, real accusations start real quarrels, and the clans remember what actually happened: get caught lying and your word is worth less.
 
 Every single word is written fresh by the local LLM brain, in each bot's stable voice. There are no canned line pools anywhere in this module.
 
@@ -181,6 +183,32 @@ Quarrels, threats and taunts heat a pair of clans until one boils over into a **
 
 Useful log marks in `java0.log` (with `Debug = True`): `[FIELD-WHERE]` (arena announced), `[FIELD-MATCH]`, `[GEAR]`, `[SPECTATORS]`, `[FIELD-FUSE]`/`[FIELD-STRIKE]`, `[FIELD-WIN]`/`[FIELD-DRAW]`, `[FIELD-GLOAT]`, `[RECORD]`, `[REVENGE]`.
 
+## Phase 3 — talk to the clans (on by default; `Phase3 = False` turns it off)
+
+Name a clan in world chat (shout or trade), or in local chat next to one of its members:
+
+- **Accuse it** — "SunSpear ganked me at Cruma", "IronHammer stole my drops", "they keep camping my spot". The clan answers by temperament: Peaceful questions the charge and asks for proof, Neutral owns it or denies it, Altruistic doubles down on defending the weak, Aggressive confirms everything, true or not.
+- **The world weighs in** — alliance brothers vouch for the accused, hot-blooded clans mock the soft ones as "carebears", a clan with a grudge backs you up. A real accusation can open a real quarrel, and quarrels can end in duels.
+- **They know what happened.** The module remembers duels, quarrels and favors: accuse a Peaceful clan that has never won a fight of killing you, and someone sets the record straight. Clans believe you by default; every exposed lie costs credibility, and a known liar is doubted, called out — and admired by the chaos-loving clans.
+- **Praise it** — most clans take it gracefully. Some really, really hate being called nice.
+- **Take a side** in a running quarrel, or claim you **saw it** happen.
+- **Just talk** — "hey CrimsonPhoenix, what's up?" gets a short reply in the clan's own temper. A greeting is never an accusation.
+- **Insist** — "I swear!", "they really did it". The clan answers again, firmer — and may crack if it's true. Name another clan while insisting and the charge moves to them.
+- **Don't spam it** — too many accusations earn one warning, then the clans quietly stop listening for a while.
+
+Log marks: `[ACCUSE]`, `[ACCUSE-ANSWER]`, `[ACCUSE-BYSTANDER]`, `[ACCUSE-LIE]`, `[ADDRESS]`, `[INSIST]`.
+
+## What's new in 0.3.0
+
+- **Phase 3: player accusations** — accuse, praise, take sides, witness, greet, insist; credibility, caught lies, and a hidden surprise or two.
+- **Safer duel grounds**, checked against the real terrain: no cliff edges (a Hunter Village duel used to slide into a ravine), no beaches or shallow sea (measured waterline z -3760), no wildlife far stronger than the fighters, plus no-go spots you can list (`ArenaBlockedSpots`).
+- **Duels go where they belong by level** (`ArenaTownBands`): starting villages take any level; Gludin, Gludio and Dion 20–40; Giran is the first choice for 40–51; Oren and Aden for 52+.
+- **Fairer fights**: tighter gear matching (`MaxGearGap = 3`, starter gear only meets starter gear), no dagger-on-mage 1v1s, mages open with a real nuke, healers fight when nobody on their side can, and a fair 2v2 or 3v3 when no fair 1v1 exists.
+- **Interference is detected**: hitting or debuffing a duel's fighters or fans should turn the whole crowd on you — before 0.3.0 the attack was never noticed.
+- Crowds know who is fighting, open villages are announced without "gates", and a clan no longer argues with itself.
+- Built for the October 2026 server update.
+- In the code but **off** until seen working in a real game: epic battles 4v4–9v9 (`EpicDuelChance = 0`) and alliance wars (`AllianceWars = False`).
+
 ## What's new in 0.2.3
 
 - **Quiet when nobody is home.** With no real player online, the module pauses completely: no quarrels, no duels, no brain calls. It picks up again when someone logs in.
@@ -259,13 +287,14 @@ Production hardening, driven by a real reviewer's test report — no new drama f
 - **Boot log warns about unconfigured clans** — misspelled or never-matching keys in `LivingClanIds`; the module will retry each boot.
 - **Log your session**: with `Debug = True` every delivered line appears in `game\log\java0.log` with kind, speaker and text.
 - **Known pack issue (not this module)**: a `NullPointerException` from `placeShopkeeper` about once per Living Population tick. The full stack is pack code only — `Spawn.doSpawn` with a null `_template`, called from `FakePlayerBehaviorManager.placeBot (:765)` ← `placeShopkeeper (:645)` ← `LivingPopulationManager.syncShopkeepers (:361)` ← `safeSnapshotTick (:2899)` — and it appears with this module disabled too. Reported to the pack author.
+- **A clan ignores my accusation** — it needs a trigger word (ganked, killed, camped, stole, scammed, helped, nice…; all listed in `module.ini`). A line that only names a clan is a mention, unless it's a greeting or a question. Accused too often? The clans may be ignoring you for a while — `[ACCUSE-IGNORED]` in the log says so.
 - **No duel ever starts** (Phase 2) — check `Phase2 = True`, then look for `[FIELD-SCAN]`/`[FIELD-TRY]` tallies in the log: they say why each town's arena was rejected. A fight only begins once you stand near the arena (`FenceRadius`) or `FenceMaxWaitSeconds` runs out.
 
 ## Roadmap
 
 - **Phase 1 — chat drama**: conversation engine, exchanges, kindness, war stories. *(shipped)*
 - **Phase 2 — field duels**: fair, real clan duels outside town gates, crowds, gloating, persistent records and revenge. *(shipped in 0.2.0, public testing; on by default)*
-- **Phase 3 — deployment politics**: PK-punishment hunts, adena bounties, ally assists: personas acting in the world, not only speaking.
+- **Phase 3 — crime and consequence**: step 1, player accusations, *(shipped in 0.3.0)*. Next: allies stepping into fights, ambushes and red names, adena bounties and hunts.
 
 ## License
 

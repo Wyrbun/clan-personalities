@@ -17,6 +17,9 @@ chat stays readable. **The field duels** (Phase 2, on by default): when a feud b
 the clans settle it in a fair, real duel just outside a town gate, with a watching crowd —
 see "Phase 2" below. Real clan wars stay 100% stock, and nobody but the duel's own temporary
 fighters ever takes damage. Want chat only? Set `Phase2 = False` in `config/module.ini`.
+**Talking back** (Phase 3, new in 0.3.0, on by default): accuse a clan in chat, praise one,
+take a side or just say hello, and the clans answer you in character - see "Phase 3"
+below. `Phase3 = False` turns it off.
 
 ## The brain writes the words (required — there are no line pools)
 
@@ -82,6 +85,58 @@ Quarrels, threats and taunts heat up between two clans until one boils over into
 - Fighters are temporary copies of the clans' town bots and vanish afterwards; nothing
   is saved as a character. Hunting phantoms in the field are never involved.
 
+## Phase 3: talk to the clans (on by default; `Phase3 = False` turns it off)
+
+Name a clan in world chat (shout or trade), or in local chat next to one of its members,
+and it hears you.
+
+- **Accuse it**: "SunSpear ganked me at Cruma", "IronHammer stole my drops", "they keep
+  camping my spot". The clan answers by temperament: a Peaceful clan questions the charge
+  and asks for proof, a Neutral one owns it or denies it, an Altruistic one doubles down on
+  defending the weak, an Aggressive one confirms everything - true or not.
+- **The others weigh in**: alliance brothers vouch for the accused, hot-blooded clans mock
+  the soft ones, a clan with a grudge backs you up. A real accusation can start a real
+  quarrel - and quarrels can end in duels.
+- **They know what happened.** The module remembers duels, quarrels and favors. Claim a
+  Peaceful clan that has never won a fight killed you, and someone will set the record
+  straight. Clans believe you by default, but every exposed lie costs you credibility; a
+  known liar gets doubted, called out in public - and admired by the chaos-loving clans.
+- **Praise it**: "BloodRaven helped me, they're nice". Most clans take it gracefully. Some
+  really, really don't like being called nice.
+- **Take a side** in a running quarrel ("IvoryCrown is right", "SunSpear started it"), or
+  claim you **saw it** happen.
+- **Just talk**: "hey CrimsonPhoenix, what's up?" gets a short, friendly-or-not reply.
+  A greeting or a question is never an accusation.
+- **Insist**: "I swear!", "they really did it". The clan answers again - firmer, sometimes
+  cracking if it's true. Name another clan while insisting ("no, IronHammer really did it")
+  and the charge moves to them.
+- **Don't spam it.** Too many accusations in a short time earn one warning; keep going and
+  the clans quietly stop listening for a while.
+
+Everything is tunable in `config/module.ini` (trigger words, cooldowns, credibility).
+
+## What's new in 0.3.0
+
+- **Phase 3: player accusations** (above): accuse, praise, take sides, witness, greet,
+  insist - with credibility, caught lies and a hidden surprise or two.
+- **Safer duel grounds.** Every spot is checked against the real terrain: no cliff edges
+  (a Hunter Village duel used to slide into a ravine), no beaches or shallow sea (measured
+  waterline: z -3760), no wildlife far stronger than the fighters, and no-go spots you can
+  list (`ArenaBlockedSpots`).
+- **Duels go where they belong by level.** Starting villages take any level, Gludin, Gludio
+  and Dion 20-40, Giran is the first choice for 40-51, Oren and Aden for 52+
+  (`ArenaTownBands`).
+- **Fairer fights.** Tighter gear matching (`MaxGearGap = 3`, starter gear only meets
+  starter gear), no dagger-on-mage 1v1s, mages open with a real nuke, and healers fight when
+  nobody on their side can. When no fair 1v1 exists, a fair 2v2 or 3v3 is tried.
+- **Interference is detected now.** Hitting or debuffing a duel's fighters or fans should
+  turn the whole crowd on you; before 0.3.0 the module never noticed the attack at all.
+- **Crowds know who is fighting**, open villages have no "gates" in the announcements,
+  and a clan no longer argues with itself.
+- Built for the October 2026 server update. Epic battles (4v4-9v9) and alliance wars are
+  in the code but **off** (`EpicDuelChance = 0`, `AllianceWars = False`) until they have been
+  seen working in a real game.
+
 ## What's new in 0.2.3
 
 - **Quiet when nobody is home.** With no real player online, the module pauses completely: no quarrels, no duels, no brain calls. It picks up again when someone logs in.
@@ -112,6 +167,7 @@ Quarrels, threats and taunts heat up between two clans until one boils over into
 Disable it (`Enabled = False`) and restart — or, with the server stopped, delete the
 module folder. Nothing is stored in the database (three small `.properties` files in the
 module folder hold personas, nicknames and duel records), so removal is a clean delete.
+Your credibility with the clans lives in memory only and resets on restart.
 
 ## Notes
 

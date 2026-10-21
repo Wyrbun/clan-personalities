@@ -30,7 +30,9 @@ import java.util.logging.Logger;
 import org.l2jmobius.commons.threads.ThreadPool;
 import org.l2jmobius.gameserver.model.World;
 import org.l2jmobius.gameserver.model.events.EventType;
+import org.l2jmobius.gameserver.model.events.holders.actor.creature.OnCreatureDamageReceived;
 import org.l2jmobius.gameserver.model.events.holders.actor.creature.OnCreatureSkillUse;
+import org.l2jmobius.gameserver.model.events.holders.actor.player.OnPlayerChat;
 import org.l2jmobius.gameserver.model.skill.Skill;
 import org.l2jmobius.gameserver.modules.GameModule;
 import org.l2jmobius.gameserver.modules.ModuleContext;
@@ -211,7 +213,14 @@ public final class ClanPersonalityModule implements GameModule
 			{
 				final DramaEngine watched = engine;
 				context.damage().addListener((attacker, target, damage, skill, critical) -> watched.observeHostility(attacker, target));
-				context.events().onPlayers(EventType.ON_CREATURE_SKILL_USE, (OnCreatureSkillUse event) ->
+				// Playtest 2026-10-21: a player killed a duel fighter and nothing
+				// noticed. The pack dispatches these events to GLOBAL listeners
+				// and the creature itself only (EventDispatcher.hasListener checks
+				// Global + the object) - a Players-container listener never fires,
+				// the same trap as chat. Every real hit lands here; observeHostility
+				// claims a fight once, so the damage hook above is only a backup.
+				context.events().onGlobal(EventType.ON_CREATURE_DAMAGE_RECEIVED, (OnCreatureDamageReceived event) -> watched.observeHostility(event.getAttacker(), event.getTarget()));
+				context.events().onGlobal(EventType.ON_CREATURE_SKILL_USE, (OnCreatureSkillUse event) ->
 				{
 					final Skill used = event.getSkill();
 					if ((used != null) && (used.isDebuff() || used.hasNegativeEffect()) && !used.isDamage())
@@ -298,10 +307,21 @@ public final class ClanPersonalityModule implements GameModule
 			splitCues(context.config().getString("BanterCues", DEFAULT_BANTER_CUES)),
 			splitCues(context.config().getString("ProvocationCues", DEFAULT_PROVOKE_CUES)));
 		engine.setArenaSiting(context.config().getInt("MonsterClearRadius", 700), context.config().getInt("ArenaTownTries", 0));
+		engine.setArenaBlockedSpots(context.config().getString("ArenaBlockedSpots", "118372,73628,1200"));
+		engine.setArenaEdge(context.config().getInt("ArenaEdgeRadius", 500), context.config().getInt("ArenaMaxStep", 250));
+		engine.setShore(context.config().getInt("ArenaSeaLevel", -3760), context.config().getInt("ArenaShoreRadius", 400));
+		engine.setArenaTownBands(context.config().getString("ArenaTownBands", "Talking Island: any, Elven Village: any, Dark Elven Village: any, Orc Village: any, Dwarven Village: any, Gludin Village: 20-40, Gludio Castle Town: 20-40, Dion Castle Town: 20-40, Giran Castle Town: 40-51* / 20-39 / 52-99, Hunter Village: 40-60, Heine: 45-60, Town of Oren: 52-99*, Town of Aden: 52-99*, Town of Goddard: 52-99, Rune Castle Town: 52-99, Town of Schuttgart: 52-99"));
+		engine.setGatelessTowns(context.config().getString("TownsWithoutGates", "Talking Island, Elven Village, Dark Elven Village, Orc Village, Dwarven Village, Floran Village"));
+		engine.setWildScan(context.config().getInt("ArenaWildScanRadius", 3000), context.config().getInt("ArenaWildLevelGap", 8));
 		engine.setFieldLeadSeconds(context.config().getInt("FieldLeadSeconds", 90));
 		engine.setFieldHeralds(context.config().getInt("FieldHeralds", 0));
 		engine.setMaxLevelGap(context.config().getInt("MaxLevelGap", 5));
-		engine.setMaxGearGap(context.config().getInt("MaxGearGap", 6));
+		engine.setMaxGearGap(context.config().getInt("MaxGearGap", 3));
+		engine.setBareGearMax(context.config().getInt("BareGearMax", 1));
+		engine.setDuelSizes(context.config().getInt("FieldMaxSquad", 3), context.config().getInt("EpicDuelChance", 0), context.config().getInt("EpicSquadMin", 4), context.config().getInt("EpicSquadMax", 9));
+		engine.setAllianceWars(context.config().getBoolean("AllianceWars", false));
+		engine.setGrievanceRules(context.config().getInt("EpicGrievanceStep", 3), context.config().getInt("EpicChanceCap", 40), context.config().getInt("AllianceWarAt", 6), context.config().getInt("GrievanceFadeHours", 3), context.config().getInt("WarCryWindowMinutes", 20), context.config().getInt("AllianceWarAllyLines", 4));
+		engine.setAvoidSoloMatchups(context.config().getString("AvoidSoloMatchups", "DAGGER-NUKER"));
 		engine.setFenceRadius(context.config().getInt("FenceRadius", 900));
 		engine.setVeryClose(context.config().getInt("VeryCloseRadius", 600), context.config().getInt("VeryCloseJabSeconds", 5) * 1000L, context.config().getInt("VeryCloseFenceSeconds", 25) * 1000L);
 		engine.setFieldSkillBlacklist(splitCues(context.config().getString("FieldSkillBlacklist", "Spoil,Spoil Festival,Sweeper,Festival Sweeper,Sow,Harvesting,Fake Death")));
@@ -365,6 +385,28 @@ public final class ClanPersonalityModule implements GameModule
 		_tickTask = ThreadPool.scheduleAtFixedRate(engine::tick, period, period);
 		engine.armFirstDrama(); // the guaranteed early quarrel
 
+		// Phase 3 (off by default on master): a real player's chat line that
+		// names a clan - an accusation, praise, a side taken, a claimed
+		// witness - gets an answer from that clan (Accusations.java). The
+		// pack fires the chat event to GLOBAL listeners only (Say2 calls
+		// notifyEvent(event, Class) with no container), so this registers
+		// globally; the listener itself only copies the line.
+		if (context.config().getBoolean("Phase3", true) && context.config().getBoolean("Accusations", true))
+		{
+			final Accusations accusations = Accusations.fromConfig(engine, context.config());
+			context.events().onGlobal(EventType.ON_PLAYER_CHAT, (OnPlayerChat event) -> accusations.onChat(event.getPlayer(), event.getText(), event.getChatType()));
+			_accusations = accusations;
+			context.logging().info("clan-personalities: Phase 3 player accusations armed (channels " + accusations.channelsText() + ").");
+		}
+
+		// The .clanp test command, for testing alone: only with Debug AND
+		// TestCommands on (both off in a shipped config).
+		if (context.config().getBoolean("Debug", false) && context.config().getBoolean("TestCommands", false))
+		{
+			context.handlers().registerVoicedCommand(new TestCommands(engine, _accusations));
+			context.logging().info("clan-personalities: TEST COMMANDS ON - type .clanp in game (TestCommands = True; switch it off for normal play).");
+		}
+
 		// One-time cleanup of fighter clones the old release path saved as
 		// real characters (see MODULE.md). Off / Preview / Delete; runs once,
 		// a few minutes after boot, when the town bots are all in the world.
@@ -417,6 +459,8 @@ public final class ClanPersonalityModule implements GameModule
 
 	/** The engine, kept for onDisable so live hunts can stand down. */
 	private volatile DramaEngine _engineForHunts;
+	/** Phase 3 accusations, kept so onDisable can silence the listener. */
+	private volatile Accusations _accusations;
 
 	@Override
 	public void onDisable(ModuleContext context)
@@ -436,6 +480,12 @@ public final class ClanPersonalityModule implements GameModule
 		{
 			hunts.endAllHunts(); // no hunter outlives the module
 			_engineForHunts = null;
+		}
+		final Accusations accusations = _accusations;
+		if (accusations != null)
+		{
+			accusations.stop(); // the chat listener goes deaf
+			_accusations = null;
 		}
 		final BrainClient brain = _brainClient;
 		if (brain != null)

@@ -39,6 +39,13 @@ final class ChatQueue
 	 */
 	void schedule(int clanId, MessageKind kind, int otherClanId, long delayMillis, int voiceRank)
 	{
+		if ((otherClanId > 0) && (otherClanId == clanId))
+		{
+			// Safety net: a clan never quarrels with itself (playtest
+			// 2026-10-21: "VioletSpider vs VioletSpider").
+			_engine.accuseInfo("[SELF-PAIR] dropped a [" + kind + "] that paired clan " + clanId + " with itself.");
+			return;
+		}
 		ThreadPool.schedule(() -> _engine.deliver(clanId, kind, otherClanId, voiceRank), Math.max(1, delayMillis));
 	}
 }

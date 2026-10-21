@@ -3,7 +3,7 @@
 Maintainer reference for the module. Written against the Living World Module
 Framework (`docs/MODULE_FRAMEWORK.md`, `docs/MODULE_AUTHORING_GUIDE.md`).
 
-**Current version: 0.2.3.** This file has two halves:
+**Current version: 0.3.0** (Phase 3 step 1, player accusations, ships on; the later Phase 3 steps are designed in PHASE3.md). This file has two halves:
 
 1. **The reference** (everything up to "Changelog") describes the module *as it
    is now*. If it disagrees with an older note anywhere, the reference wins.
@@ -21,6 +21,7 @@ key by key. This file explains behavior; the ini is the config reference.
 |---|---|
 | Phase 1, "the drama" | Chat-only clan social sim. **On** whenever `Enabled = True`. |
 | Phase 2, "the fights" | Real field duels outside towns, watched and talked about. **On** by default since 0.2.0: `Phase2 = True`. Set `False` for chat-only. |
+| Phase 3, "crime and consequence" | 0.3.0 ships step 1: **player accusations** (accuse, praise, take sides, witness, greet, insist). **On** by default: `Phase3 = True`. Later steps (ally assists, ambushes, bounties) are designed in PHASE3.md, not built. |
 | Words | Every spoken line is written live by the pack's FPC brain. There are **no line pools**. No brain means silence. |
 | Database | None. Nothing is written to SQL. State lives in three small files (see "State files"). |
 | Stock code | Untouched. The module uses only public game types and standard chat packets. |
@@ -196,6 +197,39 @@ and the code path remains only as a dial.
 2026-10-19, which saved fight clones as characters. It defaults to `Off`.
 `Preview` only lists matches. A fresh install never needs it.
 
+## Phase 3: player accusations (`Phase3 = True`, the default)
+
+`Accusations.java`. A real player's chat line (SHOUT, TRADE; GENERAL only with a member
+of the named clan within 1250) that names a clan is read for cues, never on the packet
+thread. Clan names match full, without spaces, abbreviated or by nickname.
+
+- **Moves**: ACCUSE (kill, camp, cheat incl. "stole", defend), PRAISE, SIDE_FOR,
+  SIDE_AGAINST (on a running quarrel), WITNESS. No cue = a mention, ignored silently,
+  unless it is a greeting or a question (`AddressCues`, any "?"): then the first named
+  clan gives one short casual reply (`[ADDRESS]`), with its own light gates.
+- **Truth** is rated from the module's memory, never invented: a killing charge needs a
+  duel the accused WON (or a live grudge for a hot clan); a Peaceful clan with no wins is a
+  FALSE claim. Camping, cheating and blame need a quarrel, a record or a grudge.
+- **Stance** by persona matrix (PHASE3.md): Peaceful QUESTION (1% admits), Neutral own or
+  deny, Altruistic double down, Aggressive confirm everything and deny any kindness.
+- **The chain** after the answer: the wronged clan reacts, up to `AccuseBystanders` clans
+  weigh in (ally vouch, "carebears" mock, liar call-out, back-up or contest), and the
+  outcome is a new quarrel, heat on a running one, or nothing. Local-chat accusations get
+  no chain. An Aggressive clan caught being nice denies it vehemently and sulks
+  (`NiceSulkMinutes`).
+- **Credibility** (RAM only): drops `CredibilityLiePenalty` once per exposed lie, however
+  many clans call it; recovers over time; doubted below 50, a known stirrer below
+  `SuspicionThreshold` (called out, praised by chaos clans).
+- **Rate limit**: over `AccuseBurstLimit` moves in the window = one warning line, then a
+  silent ignore that grows with every transgression.
+- **Insisting** (`InsistCues`, whole words, within `InsistWindowSeconds`): presses the last
+  charge again, at most `InsistMax`; may crack a clan when the record backs the claim; an
+  unexposed lie gets a second chance to be exposed; a press is only spent when answered.
+  Naming another clan while insisting moves the charge to it.
+- During a duel a clan brushes the player off with one line instead of answering.
+- **Test command** `.clanp` (only with `Debug = True` AND `TestCommands = True`): status,
+  kindness, heat, cred, forgive, ready, unsulk, grudge.
+
 ## The brain (required)
 
 The pack's FPC brain (`brain\fpc_brain.py`, Flask + Ollama or a cloud
@@ -283,7 +317,7 @@ path). Each is a plain `.properties` file. Deleting one resets that memory.
 |---|---|
 | `personas.properties` | The RANDOM persona deal. |
 | `nicknames.properties` | Clan nicknames the bots have coined. |
-| `records.properties` | Per pair: duel wins and losses, and how quarrels ended. |
+| `records.properties` | Per pair: duel wins and losses, and how quarrels ended. With `AllianceWars = True` also `grievance.*` lines (older versions skip them). |
 
 ## Layout
 
@@ -295,6 +329,8 @@ clan-personalities/
     ClanPersonalityModule.java # entry point (GameModule): config, boot probe, keeper
     BrainClient.java           # HTTP client for the FPC brain; breaker; keeper
     DramaEngine.java           # the engine: drama, focus, reading, Phase 2 duels, brain gate
+    Accusations.java           # Phase 3: player accusations, casual talk, insisting
+    TestCommands.java          # the .clanp GM test command (Debug + TestCommands only)
     ClanSpec.java              # configured clan: token/id + persona + group
     ClanProfile.java           # resolved clan: name, cooldown, presence
     ChatQueue.java             # randomized-delay scheduled sends
@@ -337,6 +373,13 @@ clan-personalities/
   this.
 - Skill weapon conditions: `ConditionUsingItemType` inside `Skill`'s
   pre-conditions, with `WeaponType.mask()` bits.
+- **Events reach GLOBAL listeners only** for `ON_PLAYER_CHAT`, `ON_CREATURE_DAMAGE_RECEIVED`
+  and `ON_CREATURE_SKILL_USE`: `EventDispatcher.hasListener` checks `Containers.Global()`
+  and the object itself, never the Players container. Use `context.events().onGlobal`.
+- A town bot's real level is `getFakePlayerAppearance().getLevel()`; the NPC shell's own
+  `getLevel()` reports a template value (85).
+- The sea has no water zone on the pack's coasts; the waterline is z = -3760 everywhere
+  (measured at Talking Island and Gludin, 2026-10-21).
 
 ## Log marks (with `Debug = True`)
 
@@ -351,6 +394,9 @@ clan-personalities/
 | The fight and after | `FIELD-FIGHT` `FIELD-BLOWS` `FIELD-KILL` `FIELD-WIN` `FIELD-LOSS` `FIELD-DRAW` `FIELD-GLOAT` `FIELD-BLAME` `CROWD` `FIELD-EXIT` |
 | Records | `RECORD` `REVENGE` |
 | Interference | `INTERFERE` `INTERFERE-BERATE` `INTERFERE-WORLD` `INTERFERE-WAVE` `INTERFERE-END` |
+| Accusations | `ACCUSE` `ACCUSE-ANSWER` `ACCUSE-REACT` `ACCUSE-BYSTANDER` `ACCUSE-OUTCOME` `ACCUSE-LIE` `ACCUSE-WARN` `ACCUSE-IGNORED` `ACCUSE-SKIP` `ACCUSE-HELD` `ACCUSE-SULK` `STIRRER` `ADDRESS` `INSIST` `INSIST-REDIRECT` `INSIST-OUTCOME` |
+| Arena siting | `FIELD-SCAN` lines count refusals: inside a town, wet or by the sea, unwalkable, near a guard or aggressive monster, blocked spot, cliff edge, wildlife too strong |
+| Safety | `SELF-PAIR` (a line that paired a clan with itself, dropped) |
 | Brain | `BRAIN-GATE`, `IDLE`, `brain miss ... line skipped` |
 
 ## Lifecycle and both off states
@@ -386,6 +432,31 @@ reported to the pack author.
 
 History, newest first. Where an entry contradicts the reference above, the
 reference describes the current behavior.
+
+### 0.3.0 (2026-10-21): the clans answer back
+
+- **Phase 3 step 1, player accusations**, on by default (see the reference above): the
+  four moves plus witness, the persona matrix, the bystander chain, credibility and caught
+  lies, the escalating rate limit, casual greetings and questions, insisting and moving a
+  charge, the caught-being-nice sulk, and the `.clanp` test command.
+- Killing charges need a duel the accused won (an old quarrel record had made a lie about
+  a Peaceful clan look true). One exposed lie costs credibility once.
+- **Arena siting**: a cliff test on the pack's geodata (`ArenaEdgeRadius`, `ArenaMaxStep`),
+  a shore test from the measured waterline (`ArenaSeaLevel`, `ArenaShoreRadius`), no-go
+  circles (`ArenaBlockedSpots`), town level bands (`ArenaTownBands`) and a wildlife scan
+  (`ArenaWildScanRadius`, `ArenaWildLevelGap`). Duel level now reads the appearance level.
+- **Fairness**: `MaxGearGap` 3, `BareGearMax` 1, `AvoidSoloMatchups` (DAGGER-NUKER),
+  nukers open with a damage spell, supports fight when their side has no striker, and a
+  team-fair 2v2/3v3 when no pair-by-pair match exists (`FieldMaxSquad`).
+- **Interference detection** moved to global damage and skill events: the duel's attacker
+  was never noticed before.
+- Crowd and taunt prompts name both sides; open villages are announced without gates
+  (`TownsWithoutGates`); clans are "they", never "he"; a clan naming itself is not a
+  callout, and the queue drops any self-pair.
+- Built and checked against the October 2026 GameServer.jar.
+- **In the code, off**: epic battles 4v4-9v9 (`EpicDuelChance = 0`) and grievances with
+  alliance wars and alliance pools (`AllianceWars = False`), until they have been seen
+  working in a real game.
 
 ### 0.2.3 (2026-10-20): quiet when nobody is home
 

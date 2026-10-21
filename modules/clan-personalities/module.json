@@ -1,10 +1,10 @@
 {
   "id": "clan-personalities",
   "name": "Clan Personalities",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "apiVersion": "1",
   "entrypoint": "modules.clanpersonalities.ClanPersonalityModule",
-  "description": "Living clans with personalities that talk AND fight. Five personas (Peaceful, Neutral, Altruistic, Aggressive, Player-Killing) drive world-chat drama written live by the pack's FPC brain: quarrels, taunts, threats, alliances and remembered grudges. When a feud boils over, the clans settle it in a real NPC-vs-NPC duel outside a town gate - fair level and gear matching, class roles (healers heal, mages cast), a gossiping crowd, gloating winners, and win/loss records with revenge that persist across restarts. Requires the FPC brain. Duels on by default (Phase2 = False for chat only).",
+  "description": "Living clans with personalities that talk AND fight. Five personas (Peaceful, Neutral, Altruistic, Aggressive, Player-Killing) drive world-chat drama written live by the pack's FPC brain: quarrels, taunts, threats, alliances and remembered grudges. When a feud boils over, the clans settle it in a real NPC-vs-NPC duel outside a town gate - fair level and gear matching, class roles (healers heal, mages cast), a gossiping crowd, gloating winners, and win/loss records with revenge that persist across restarts. And the clans answer YOU: accuse one of ganking, praise one, take a side or just say hello, and they reply in character, call out your lies and remember them. Requires the FPC brain. Duels and player accusations on by default (Phase2 / Phase3 = False to turn them off).",
   "author": "Wyr",
   "priority": 100,
   "dependencies": [],
