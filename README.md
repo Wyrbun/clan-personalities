@@ -2,7 +2,9 @@
 
 **Clans in your Lineage 2 world that actually *talk* — and settle it with steel. They argue, hold grudges, help each other, remember everything, and when a feud boils over, they fight it out in front of you. And now they answer *you*.**
 
-**Latest: [v0.3.0](https://github.com/Wyrbun/clan-personalities/releases/tag/v0.3.0)** — the clans answer back: accuse them, praise them, take sides, or just say hello.
+> **This project is retired (November 2026).** Its main ideas — clans with personalities, clan chat and quarrels, grudges, clan wars and alliances, and players accusing clans in shout — now live natively in **[Living Worlds](https://livingworlds.pages.dev) v0.4.2 and later**. If you run a current Living Worlds, you don't need this module (it was never tested alongside those built-in features, and the two may talk over each other).
+>
+> **[v0.3.0](https://github.com/Wyrbun/clan-personalities/releases/tag/v0.3.0) is the final release**, still downloadable for older packs. The repository is archived: read-only, kept for reference. Thank you to everyone who tested it!
 
 This module gives living clans five personalities (Peaceful, Neutral, Altruistic, Aggressive, Player-Killing). Their bots speak in world chat through the pack's FPC brain: they pick quarrels over concrete incidents, taunt and threaten, fire back at whoever calls them out, drag their allies in, soften into kindness when the stage is calm, and retell old wars days later — each side remembering it their own way.
 

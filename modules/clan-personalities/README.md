@@ -1,5 +1,10 @@
 # Clan Personalities
 
+> **Retired (November 2026).** This module's main ideas now live natively in
+> [Living Worlds](https://livingworlds.pages.dev) v0.4.2 and later, so a current
+> pack doesn't need it. v0.3.0 is the final release; it was never tested
+> alongside the pack's own clan chat and wars.
+
 A server-side module for the Living World server: the clans of the world get
 **personalities**, and you get to watch their drama unfold in chat.
 
